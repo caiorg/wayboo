@@ -184,7 +184,10 @@ export async function buildApp(opts: { logger?: boolean } = {}) {
   // Portabilidade e eliminação (LGPD art. 18). O que é guardado está em docs/privacidade.md.
   app.get('/me/export', async (req, reply) => {
     const data = exportUserData(userOf(req));
-    return reply.header('content-disposition', 'attachment; filename="wayboo-dados.json"').send(data);
+    return reply
+      .header('content-disposition', 'attachment; filename="wayboo-dados.json"')
+      .header('cache-control', 'no-store')
+      .send(data);
   });
 
   app.delete('/me', async (req) => ({ deleted: deleteUserData(userOf(req)) }));
