@@ -55,7 +55,7 @@ function fakeServer() {
       h.reached();
       await h.gate;
     }
-    return new Response(JSON.stringify(body), { status });
+    return new Response(status === 204 ? null : JSON.stringify(body), { status });
   };
   const fetch = vi.fn(async (url: string, init: RequestInit) => {
     const path = new URL(url).pathname;
@@ -79,7 +79,7 @@ function fakeServer() {
       const active = [...devices].filter(([t, u]) => u === userId && !revoked.has(t));
       if (active.length === 1) return json(route, 409, { error: 'Este é o único aparelho conectado.' });
       revoked.add(token);
-      return new Response(null, { status: 204 });
+      return json(route, 204, null);
     }
     if (path === '/me' && init.method === 'DELETE') {
       for (const [t, u] of devices) if (u === userId) devices.delete(t);
@@ -271,6 +271,31 @@ describe('aparelhos', () => {
 
     await api.privacy();
     expect(useSettings.getState().credentials[url]!.userId).not.toBe(before.userId);
+  });
+
+  it('resposta atrasada do logout não descarta o usuário novo criado por uma chamada concorrente', async () => {
+    const server = fakeServer();
+    vi.stubGlobal('fetch', server.fetch);
+    const { api } = await import('../src/lib/api');
+    const { normalizeApiUrl, useSettings } = await import('../src/lib/store');
+    const url = normalizeApiUrl(useSettings.getState().apiUrl);
+
+    await api.privacy();
+    server.addDevice(useSettings.getState().credentials[url]!.userId!);
+
+    // O servidor já revogou, mas a resposta do logout demora.
+    const out = server.hold('POST /auth/logout');
+    const leaving = api.logout();
+    await out.arrived;
+    // Outra chamada leva 401 e registra um usuário novo pela recuperação.
+    await expect(api.privacy()).rejects.toThrow(/desconectado/);
+    const fresh = useSettings.getState().credentials[url];
+    const freshId = useSettings.getState().userId;
+
+    out.release();
+    await leaving;
+    expect(useSettings.getState().credentials[url]).toEqual(fresh);
+    expect(useSettings.getState().userId).toBe(freshId);
   });
 
   it('sair do único aparelho é recusado e mantém a credencial', async () => {

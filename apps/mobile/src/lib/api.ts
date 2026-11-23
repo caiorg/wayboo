@@ -247,8 +247,11 @@ export const api = {
    */
   logout: async () => {
     const baseUrl = currentUrl();
+    await hydrated();
+    const localId = useSettings.getState().userId;
     await request<unknown>('POST', '/auth/logout', {});
-    useSettings.getState().resetIdentity(baseUrl);
+    // Uma chamada concorrente pode já ter trocado a identidade (token revogado): a nova fica.
+    if (useSettings.getState().userId === localId) useSettings.getState().resetIdentity(baseUrl);
     // Se a gravação falhar, o app reabre com o token revogado, leva 401 e registra um token novo.
     await settingsSaved().catch(() => {});
   },
