@@ -7,6 +7,7 @@ const h = vi.hoisted(() => ({
   secure: new Map<string, string>(),
   secureFails: false,
   secureReadFails: false,
+  removeFails: false,
 }));
 
 vi.mock('react-native', () => ({
@@ -22,7 +23,10 @@ vi.mock('@react-native-async-storage/async-storage', () => ({
   default: {
     getItem: async (k: string) => h.async.get(k) ?? null,
     setItem: async (k: string, v: string) => void h.async.set(k, v),
-    removeItem: async (k: string) => void h.async.delete(k),
+    removeItem: async (k: string) => {
+      if (h.removeFails) throw new Error('disco cheio');
+      h.async.delete(k);
+    },
   },
 }));
 vi.mock('expo-secure-store', () => ({
@@ -63,6 +67,7 @@ beforeEach(() => {
   h.secure.clear();
   h.secureFails = false;
   h.secureReadFails = false;
+  h.removeFails = false;
   vi.clearAllMocks();
 });
 
@@ -168,6 +173,22 @@ describe('chave antiga trajeto-settings', () => {
     const { useSettings } = await openApp();
 
     expect(useSettings.getState().userId).toBe('local-1');
+    expect([...h.async.keys()]).toEqual(['wayboo-settings']);
+    expect(savedJson()).toBe(saved);
+  });
+
+  it('se apagar a antiga falhar, abre com a nova e tenta de novo na próxima abertura', async () => {
+    h.async.set('wayboo-settings', saved);
+    h.async.set('trajeto-settings', JSON.stringify({ state: { userId: 'antigo' }, version: 0 }));
+    h.removeFails = true;
+    const { useSettings, settingsHydration } = await openApp();
+
+    expect(await settingsHydration).toBeNull();
+    expect(useSettings.getState().userId).toBe('local-1');
+    expect([...h.async.keys()].sort()).toEqual(['trajeto-settings', 'wayboo-settings']);
+
+    h.removeFails = false;
+    await openApp();
     expect([...h.async.keys()]).toEqual(['wayboo-settings']);
     expect(savedJson()).toBe(saved);
   });
