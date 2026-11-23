@@ -2,6 +2,9 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+// Importado já na fase de import, sem prazo: o primeiro `plannerWith` só reavalia o código já transformado, e o
+// teste não paga a transformação do planejador e do `@wayboo/core` dentro dos 5 s.
+import '../src/ai/planner';
 import { openRouterProvider, openRouterStructuredOutputSupport } from '../src/ai/providers';
 
 const MODEL = 'openai/gpt-4o-mini';
