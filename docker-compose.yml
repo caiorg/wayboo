@@ -155,9 +155,10 @@ services:
       TRUST_PROXY: uniquelocal
     # Faz host.docker.internal apontar para a máquina também no Docker Engine do Linux, que não cria esse nome
     # (requer Engine 20.10+). O Docker Desktop já o cria; aqui ele aponta para o mesmo IP do host. Serve para
-    # um Ollama na máquina (ver "Ollama na mesma máquina" em docs/self-host.md).
+    # um Ollama na máquina. HOST_GATEWAY troca o destino por um IP, para daemon sem bridge padrão ou rootless
+    # (ver "Ollama na mesma máquina" em docs/self-host.md).
     extra_hosts:
-      - host.docker.internal:host-gateway
+      - host.docker.internal:${HOST_GATEWAY:-host-gateway}
     volumes:
       - api:/data
 

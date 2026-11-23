@@ -124,9 +124,24 @@ Se o endereço do passo 2 for público, inclua-o também em `TRUST_PROXY` no `do
 
 ### Ollama na mesma máquina
 
-Use `AI_BASE_URL=http://host.docker.internal:11434/v1`. O serviço `api` do `docker-compose.yml` mapeia esse nome para a máquina com `extra_hosts: host.docker.internal:host-gateway`, então ele resolve no Linux sem arquivo extra. O Docker Desktop já cria o nome, e nele `host-gateway` aponta para o mesmo endereço do host. No Docker Engine do Linux, `host-gateway` vira o IP da bridge padrão (`docker0`, em geral `172.17.0.1`). O Docker Engine aceita esse valor a partir da versão 20.10.
+Use `AI_BASE_URL=http://host.docker.internal:11434/v1`. O serviço `api` do `docker-compose.yml` mapeia esse nome para a máquina com `extra_hosts: host.docker.internal:host-gateway`, então ele resolve no Linux sem arquivo extra. O Docker Desktop já cria o nome, e nele `host-gateway` aponta para o mesmo endereço do host. No Docker Engine do Linux, `host-gateway` vira o IP da interface `docker0`, a bridge padrão (em geral `172.17.0.1`). O Docker Engine aceita esse valor a partir da versão 20.10.
 
-Por padrão, o Ollama escuta só em `127.0.0.1:11434`, que o contêiner não alcança no Linux. Defina `OLLAMA_HOST=0.0.0.0:11434` no serviço do Ollama. Isso abre a porta 11434 para a rede: restrinja o acesso a ela no firewall da máquina, porque o Ollama não pede autenticação. Se o firewall bloqueia conexões de entrada por padrão (o `ufw`, por exemplo), libere a 11434 só para as redes do Docker, como `172.16.0.0/12`.
+A variável `HOST_GATEWAY` do `.env` troca esse destino por um IP. Ela vale para qualquer instalação, com ou sem Ollama, porque o Docker recusa criar a API quando não consegue resolver `host-gateway`:
+
+- Daemon sem bridge padrão (`"bridge": "none"` no `daemon.json`) e sem `host-gateway-ip`: use um IP da máquina que o contêiner alcance, por exemplo o gateway da rede do Compose (`docker network inspect wayboo_default --format '{{(index .IPAM.Config 0).Gateway}}'`). Outra saída é definir `host-gateway-ip` no `daemon.json`.
+- Docker rootless com `slirp4netns`: `host-gateway` aponta para a bridge dentro do namespace do daemon, não para a máquina ([moby/moby#47684](https://github.com/moby/moby/issues/47684)). Use `HOST_GATEWAY=10.0.2.2`, o endereço da máquina no `slirp4netns`, e inicie o daemon com `DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false` para ele alcançar as portas da máquina. O `10.0.2.2` leva ao loopback da máquina, então o Ollama pode continuar em `127.0.0.1`.
+
+Depois de mudar `HOST_GATEWAY`, rode `docker compose up -d api`.
+
+Por padrão, o Ollama escuta só em `127.0.0.1:11434`, que o contêiner não alcança no Docker Engine comum. Defina `OLLAMA_HOST=0.0.0.0:11434` no serviço do Ollama. Isso abre a porta 11434 para a rede: restrinja o acesso a ela no firewall da máquina, porque o Ollama não pede autenticação. Se o firewall bloqueia conexões de entrada por padrão (o `ufw`, por exemplo), libere a 11434 só para a interface e a sub-rede da rede do Compose. Uma faixa ampla como `172.16.0.0/12` também cobre máquinas da LAN que usem endereços nela. Com a stack no ar:
+
+```sh
+net=$(docker network inspect wayboo_default --format '{{.Id}}')
+subnet=$(docker network inspect wayboo_default --format '{{(index .IPAM.Config 0).Subnet}}')
+sudo ufw allow in on "br-${net:0:12}" from "$subnet" to any port 11434 proto tcp
+```
+
+A interface `br-…` e a sub-rede mudam se a rede for recriada (por exemplo, após `docker compose down`). Nesse caso, apague a regra antiga com `sudo ufw delete` e crie de novo.
 
 ## HTTPS
 
