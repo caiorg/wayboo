@@ -2,7 +2,7 @@ import type { PlanResponse } from '@wayboo/core';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as Speech from 'expo-speech';
-import { pickVoice, startNavigation, stopNavigation, useNavSession, type VoiceInfo } from '../src/lib/navigation';
+import { pickVoice, startNavigation, stopNavigation, toggleMute, useNavSession, type VoiceInfo } from '../src/lib/navigation';
 import { useLocationStore } from '../src/lib/location';
 import { useSettings } from '../src/lib/store';
 
@@ -62,6 +62,7 @@ beforeEach(() => {
   active.clear();
   mocks.announcement = null;
   useSettings.setState({ voice: false });
+  useNavSession.setState({ muted: false });
   useLocationStore.setState({ fix: null });
 });
 
@@ -261,5 +262,36 @@ describe('voz da navegação', () => {
     resolve(macVoices as Speech.Voice[]);
     await settle();
     expect(Speech.speak).not.toHaveBeenCalled();
+  });
+
+  it('descarta a fala pendente quando a voz é desligada em Ajustes', async () => {
+    let resolve!: (v: Speech.Voice[]) => void;
+    vi.mocked(Speech.getAvailableVoicesAsync).mockReturnValueOnce(new Promise((r) => (resolve = r)));
+    useSettings.setState({ voice: true });
+    useLocationStore.setState({ fix });
+    mocks.announcement = 'Vire à direita';
+    await startNavigation(plan, 0, false);
+    useSettings.setState({ voice: false });
+    resolve(macVoices as Speech.Voice[]);
+    await settle();
+    expect(Speech.speak).not.toHaveBeenCalled();
+  });
+
+  it('ligar e desligar o mudo descarta a fala pendente, mas não as próximas', async () => {
+    let resolve!: (v: Speech.Voice[]) => void;
+    vi.mocked(Speech.getAvailableVoicesAsync).mockReturnValueOnce(new Promise((r) => (resolve = r)));
+    useSettings.setState({ voice: true });
+    useLocationStore.setState({ fix });
+    mocks.announcement = 'Vire à direita';
+    await startNavigation(plan, 0, false);
+    toggleMute();
+    toggleMute();
+    resolve(macVoices as Speech.Voice[]);
+    await settle();
+    expect(Speech.speak).not.toHaveBeenCalled();
+    mocks.announcement = 'Vire à esquerda';
+    useLocationStore.setState({ fix: { ...fix, t: 2 } });
+    await settle();
+    expect(Speech.speak).toHaveBeenCalledWith('Vire à esquerda', { language: 'pt-BR', voice: 'Luciana', rate: 1.02 });
   });
 });

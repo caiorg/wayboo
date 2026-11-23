@@ -163,15 +163,16 @@ function voiceFor(language: string): Promise<string | null> {
   return found;
 }
 
-/** Sobe a cada fala e no fim da navegação: uma fala que ainda espera a voz e ficou velha é descartada. */
+/** Sobe a cada fala, no fim da navegação e ao ativar o mudo: uma fala que ainda espera a voz e ficou velha é descartada. */
 let speechGen = 0;
 
+const canSpeak = () => useSettings.getState().voice && !useNavSession.getState().muted;
+
 function speak(text: string) {
-  const { voice } = useSettings.getState();
-  if (!voice || useNavSession.getState().muted) return;
+  if (!canSpeak()) return;
   const gen = ++speechGen;
   void voiceFor(INSTRUCTION_LANGUAGE).then((id) => {
-    if (gen !== speechGen || useNavSession.getState().muted) return;
+    if (gen !== speechGen || !canSpeak()) return;
     Speech.stop();
     Speech.speak(text, { language: INSTRUCTION_LANGUAGE, voice: id ?? undefined, rate: 1.02 });
   });
@@ -310,7 +311,10 @@ export async function stopNavigation(): Promise<void> {
 
 export function toggleMute() {
   const muted = !useNavSession.getState().muted;
-  if (muted) Speech.stop();
+  if (muted) {
+    speechGen++;
+    Speech.stop();
+  }
   useNavSession.setState({ muted });
 }
 
