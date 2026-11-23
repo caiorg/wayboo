@@ -1,9 +1,18 @@
 import { ALERT_TYPES, formatDurationPtBR, type AlertType, type FinishTripResponse, type Suggestion } from '@wayboo/core';
 import { Pressable, StyleSheet, View } from 'react-native';
+import type { ReportAccuracy } from '@/lib/gpsAccuracy';
 import { ALERT_COLORS, ALERT_ICONS, ALERT_LABELS, useTheme } from '@/lib/theme';
 import { Button, Card, Icon, T, type IconName } from './ui';
 
-export function ReportSheet({ onReport, onClose }: { onReport: (type: AlertType) => void; onClose: () => void }) {
+export function ReportSheet({
+  accuracy,
+  onReport,
+  onClose,
+}: {
+  accuracy: ReportAccuracy;
+  onReport: (type: AlertType) => void;
+  onClose: () => void;
+}) {
   const t = useTheme();
   return (
     <Card style={{ gap: 14 }}>
@@ -15,14 +24,24 @@ export function ReportSheet({ onReport, onClose }: { onReport: (type: AlertType)
           <Icon name="close" color={t.textMuted} />
         </Pressable>
       </View>
+      {accuracy.ok ? null : (
+        <View style={[styles.learnBox, { backgroundColor: t.surfaceAlt }]} accessibilityRole="alert">
+          <Icon name="crosshairs-question" color={t.warning} size={20} />
+          <T variant="caption" color={t.text} style={{ flex: 1 }}>
+            {accuracy.message}
+          </T>
+        </View>
+      )}
       <View style={styles.grid}>
         {ALERT_TYPES.map((type) => (
           <Pressable
             key={type}
             accessibilityRole="button"
             accessibilityLabel={ALERT_LABELS[type]}
+            accessibilityState={{ disabled: !accuracy.ok }}
+            disabled={!accuracy.ok}
             onPress={() => onReport(type)}
-            style={({ pressed }) => [styles.cell, { backgroundColor: t.surfaceAlt, opacity: pressed ? 0.7 : 1 }]}
+            style={({ pressed }) => [styles.cell, { backgroundColor: t.surfaceAlt, opacity: !accuracy.ok ? 0.4 : pressed ? 0.7 : 1 }]}
           >
             <View style={[styles.circle, { backgroundColor: ALERT_COLORS[type] }]}>
               <Icon name={ALERT_ICONS[type] as IconName} color="#FFFFFF" size={24} />

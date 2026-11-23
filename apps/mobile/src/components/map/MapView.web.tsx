@@ -1,11 +1,48 @@
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Map as MlMap, setWorkerUrl, type GeoJSONSource, type LayerSpecification, type MapMouseEvent } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { useEffect, useRef } from 'react';
-import { buildSources, layerSpecs, SOURCE, type MapViewProps } from './mapData';
+import { buildSources, GLYPH_IMAGE_SIZE, layerSpecs, MAP_GLYPHS, SOURCE, type MapViewProps } from './mapData';
 
 // O Metro não resolve o worker que o maplibre-gl 6 carrega via import.meta.url.
 // O postinstall copia o arquivo para public/, que o Expo serve na raiz.
 setWorkerUrl('/maplibre-gl-worker.mjs');
+
+type GlyphImage = { data: ImageData; pixelRatio: number };
+
+/** O expo-font não rasteriza glifos na web; desenha cada um num canvas com a fonte de ícones. */
+let glyphImages: Promise<Record<string, GlyphImage>> | null = null;
+function loadGlyphImages(): Promise<Record<string, GlyphImage>> {
+  glyphImages ??= (async () => {
+    const family = MaterialCommunityIcons.getFontFamily();
+    const pixelRatio = Math.max(1, Math.round(window.devicePixelRatio || 1));
+    const side = GLYPH_IMAGE_SIZE * pixelRatio;
+    await MaterialCommunityIcons.loadFont();
+    await document.fonts.load(`${side}px "${family}"`);
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = side;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) throw new Error('Canvas 2D indisponível');
+    const glyphMap = MaterialCommunityIcons.glyphMap as Record<string, number>;
+    const out: Record<string, GlyphImage> = {};
+    for (const [id, glyph] of Object.entries(MAP_GLYPHS)) {
+      const code = glyphMap[glyph];
+      if (code === undefined) continue;
+      ctx.clearRect(0, 0, side, side);
+      ctx.font = `${side}px "${family}"`;
+      ctx.fillStyle = '#FFFFFF';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String.fromCodePoint(code), side / 2, side / 2);
+      out[id] = { data: ctx.getImageData(0, 0, side, side), pixelRatio };
+    }
+    return out;
+  })().catch((e: unknown) => {
+    glyphImages = null;
+    throw e;
+  });
+  return glyphImages;
+}
 
 /** Implementação web com maplibre-gl. Mesmas camadas e fontes da versão nativa. */
 export function MapView({ theme, data, camera, initialCenter, onLongPress, onUserPan }: MapViewProps) {
@@ -22,6 +59,15 @@ export function MapView({ theme, data, camera, initialCenter, onLongPress, onUse
     for (const l of layerSpecs(latest.current.theme)) {
       if (!m.getLayer(l.id)) m.addLayer(l as unknown as LayerSpecification);
     }
+    // Trocar o estilo apaga as imagens também. Sem elas, ficam só as bolinhas coloridas.
+    loadGlyphImages()
+      .then((imgs) => {
+        if (map.current !== m) return;
+        for (const [id, img] of Object.entries(imgs)) {
+          if (!m.hasImage(id)) m.addImage(id, img.data, { pixelRatio: img.pixelRatio });
+        }
+      })
+      .catch((e: unknown) => console.warn('Ícones dos alertas indisponíveis', e));
   };
 
   useEffect(() => {
