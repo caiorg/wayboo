@@ -153,6 +153,11 @@ services:
       # A API não publica porta: na rede privada do compose só o gateway chega a ela, e o Caddy descarta o
       # X-Forwarded-For vindo do cliente. Assim o cabeçalho que ele repassa traz o IP real.
       TRUST_PROXY: uniquelocal
+    # Faz host.docker.internal apontar para a máquina também no Docker Engine do Linux, que não cria esse nome
+    # (requer Engine 20.10+). O Docker Desktop já o cria; aqui ele aponta para o mesmo IP do host. Serve para
+    # um Ollama na máquina (ver "Ollama na mesma máquina" em docs/self-host.md).
+    extra_hosts:
+      - host.docker.internal:host-gateway
     volumes:
       - api:/data
 
