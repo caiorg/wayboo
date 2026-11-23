@@ -60,6 +60,19 @@ describe('autenticação por aparelho', () => {
     expect((await privacy(bearer(second.token))).json()).toEqual({ shareCrowd: false });
   });
 
+  it('não adota de novo o UUID de um usuário apagado', async () => {
+    // Aparelho restaurado de backup sem o token, ou registro em curso durante o `DELETE /me`.
+    const legacy = randomUUID();
+    const first = await register(legacy);
+    expect(first.userId).toBe(legacy);
+    expect((await app.inject({ method: 'DELETE', url: '/me', headers: bearer(first.token) })).statusCode).toBe(200);
+
+    const again = await register(legacy);
+    expect(again.userId).not.toBe(legacy);
+    const retryOld = await register(legacy, first.token);
+    expect(retryOld.userId).not.toBe(legacy);
+  });
+
   it('repetir o registro com o mesmo token devolve o mesmo usuário', async () => {
     // Resposta perdida: o aparelho reenvia o token que já tinha gravado.
     const legacy = randomUUID();
