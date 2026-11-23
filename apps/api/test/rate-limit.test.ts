@@ -46,10 +46,12 @@ describe('limite de registro em POST /auth/device', () => {
     const api = client(() => a, makeRoute());
     for (let i = 0; i < 3; i++) expect((await api.register()).userId).toBeTruthy();
 
-    const blocked = await post(a);
+    const blocked = await post(a, undefined, { origin: 'http://localhost:8081' });
     expect(blocked.statusCode).toBe(429);
     expect(Number(blocked.headers['retry-after'])).toBeGreaterThan(0);
     expect(Number(blocked.headers['retry-after'])).toBeLessThanOrEqual(600);
+    // Sem expor, o navegador esconde o cabeçalho do app web em outra origem.
+    expect(String(blocked.headers['access-control-expose-headers']).toLowerCase()).toContain('retry-after');
 
     vi.advanceTimersByTime(10 * 60_000);
     expect((await post(a)).statusCode).toBe(200);
