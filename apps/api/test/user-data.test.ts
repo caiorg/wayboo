@@ -158,6 +158,7 @@ describe('dados do usuário', () => {
     const res = await call<UserDataExport>(user, 'GET', '/me/export');
     expect(res.status).toBe(200);
     expect(res.headers['content-disposition']).toContain('attachment');
+    expect(res.headers['cache-control']).toBe('no-store');
     const { tables } = res.body;
     expect(res.body.userId).toBe(user.userId);
     expect(tables.trips!.map((t) => t.id)).toEqual([tripId]);
