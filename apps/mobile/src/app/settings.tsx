@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
 import { ScrollView, StyleSheet, Switch, TextInput, View } from 'react-native';
 import { Button, Card, Chip, T } from '@/components/ui';
-import { api, LocalSaveError } from '@/lib/api';
+import { api, ApiError, LocalSaveError, type DeviceInfo } from '@/lib/api';
 import { exportMyData, type ExportResult } from '@/lib/exportData';
 import { normalizeApiUrl, useSettings, type ThemePref } from '@/lib/store';
 import { useTheme } from '@/lib/theme';
+
+const day = (iso: string) => new Date(iso).toLocaleDateString('pt-BR');
 
 export default function SettingsScreen() {
   const t = useTheme();
@@ -21,6 +23,46 @@ export default function SettingsScreen() {
   const [deleteMsg, setDeleteMsg] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportResult, setExportResult] = useState<ExportResult | null>(null);
+  // null enquanto carrega ou sem conexão.
+  const [devices, setDevices] = useState<DeviceInfo[] | null>(null);
+  // Mesmo padrão de dois toques de "Apagar meus dados": o id armado e o que está em andamento.
+  const [deviceConfirm, setDeviceConfirm] = useState<string | null>(null);
+  const [deviceBusy, setDeviceBusy] = useState<string | null>(null);
+  const [deviceMsg, setDeviceMsg] = useState<string | null>(null);
+
+  const loadDevices = async () => {
+    try {
+      // Este aparelho primeiro; o servidor ordena por data de registro.
+      setDevices((await api.devices()).devices.sort((x, y) => Number(y.current) - Number(x.current)));
+    } catch {
+      setDevices(null);
+      setDeviceMsg('Não foi possível ler os aparelhos no servidor.');
+    }
+  };
+
+  const revoke = async (d: DeviceInfo) => {
+    if (deviceConfirm !== d.id) {
+      setDeviceConfirm(d.id);
+      setDeviceMsg(d.current ? 'Toque de novo para sair. Este aparelho vira um usuário novo, sem o histórico.' : 'Toque de novo para desconectar o aparelho.');
+      return;
+    }
+    setDeviceConfirm(null);
+    setDeviceBusy(d.id);
+    try {
+      if (d.current) {
+        await api.logout();
+        setDeviceMsg('Você saiu. Este aparelho recebeu um identificador novo.');
+        void loadPrivacy();
+      } else {
+        await api.revokeDevice(d.id);
+        setDeviceMsg('Aparelho desconectado. O token dele deixou de valer.');
+      }
+    } catch (e) {
+      setDeviceMsg(e instanceof ApiError && e.status !== 0 ? e.message : 'Não foi possível desconectar. Confira a conexão com o servidor.');
+    }
+    setDeviceBusy(null);
+    void loadDevices();
+  };
 
   const exportData = async () => {
     const server = normalizeApiUrl(useSettings.getState().apiUrl);
@@ -64,6 +106,7 @@ export default function SettingsScreen() {
       await api.deleteMyData();
       setDeleteMsg('Dados apagados no servidor. Este aparelho recebeu um identificador novo.');
       void loadPrivacy();
+      void loadDevices();
     } catch (e) {
       setDeleteMsg(e instanceof LocalSaveError ? e.message : 'Não foi possível apagar. Confira a conexão com o servidor.');
     }
@@ -77,6 +120,8 @@ export default function SettingsScreen() {
       setDeleteState('idle');
       setDeleteMsg(null);
       setExportResult(null);
+      setDeviceConfirm(null);
+      setDeviceMsg(null);
     }
     s.set({ apiUrl: nextUrl });
     setStatus('Testando…');
@@ -85,6 +130,7 @@ export default function SettingsScreen() {
       const ai = h.ai ? `IA: ${h.ai.provider} (${h.ai.model}).` : 'IA desativada: o copiloto usa regras.';
       setStatus(`Conectado. ${ai} ${h.map ? 'Mapa do próprio servidor.' : 'Mapa público (OpenFreeMap).'}`);
       void loadPrivacy();
+      void loadDevices();
     } catch (e) {
       setStatus(e instanceof Error ? e.message : 'Falha');
     }
@@ -164,6 +210,33 @@ export default function SettingsScreen() {
           onPress={() => void deleteMyData()}
         />
         {deleteMsg ? <T variant="caption">{deleteMsg}</T> : null}
+      </Card>
+
+      <Card style={{ gap: 10 }}>
+        <T variant="title">Aparelhos conectados</T>
+        {devices?.map((d) => (
+          <View key={d.id} style={styles.row}>
+            <View style={{ flex: 1 }}>
+              <T>{d.current ? 'Este aparelho' : 'Outro aparelho'}</T>
+              <T variant="caption">
+                Conectado em {day(d.createdAt)}
+                {d.lastSeenAt ? ` · último uso em ${day(d.lastSeenAt)}` : ''}
+              </T>
+            </View>
+            <Button
+              label={deviceConfirm === d.id ? 'Confirmar' : d.current ? 'Sair' : 'Desconectar'}
+              kind={deviceConfirm === d.id ? 'danger' : 'secondary'}
+              icon={d.current ? 'logout' : 'link-off'}
+              loading={deviceBusy === d.id}
+              disabled={devices.length === 1}
+              onPress={() => void revoke(d)}
+            />
+          </View>
+        ))}
+        {devices?.length === 1 ? (
+          <T variant="caption">Este é o único aparelho conectado. Para sair dele, use "Apagar meus dados do servidor".</T>
+        ) : null}
+        {deviceMsg ? <T variant="caption">{deviceMsg}</T> : null}
       </Card>
 
       <Card style={{ gap: 10 }}>
