@@ -11,6 +11,7 @@ import { RouteSheet } from '@/components/RouteSheet';
 import { SearchPanel } from '@/components/SearchPanel';
 import { Card, IconButton, T } from '@/components/ui';
 import { api, type GeocodeResult } from '@/lib/api';
+import { checkReportAccuracy } from '@/lib/gpsAccuracy';
 import { startLocation, useLocationStore } from '@/lib/location';
 import { dismissSession, startNavigation, stopNavigation, toggleMute, useNavSession } from '@/lib/navigation';
 import { useSettings } from '@/lib/store';
@@ -198,10 +199,14 @@ export default function MapScreen() {
     void startNavigation(plan, selected, simulate);
   };
 
+  // Na simulação o ponto do reporte não vem do GPS, então a precisão dele não conta.
+  const reportAccuracy = checkReportAccuracy(session.simulated ? null : fix?.accuracy);
+
   const report = async (type: RoadAlert['type']) => {
     setReporting(false);
     const p = session.nav ? { lat: session.nav.snapped[1], lon: session.nav.snapped[0] } : here;
     if (!p) return notify('Sem localização para reportar.');
+    if (!reportAccuracy.ok) return notify(reportAccuracy.message);
     try {
       const a = await api.report(type, p);
       setNearbyAlerts((cur) => [a, ...cur.filter((x) => x.id !== a.id)]);
@@ -241,9 +246,9 @@ export default function MapScreen() {
       slowSpots: plan?.routes[selected]?.slowSpots ?? [],
       destination: plan?.destination ?? null,
       stops,
-      puck: here ? { ...here, heading: fix?.heading ?? null } : null,
+      puck: here ? { ...here, heading: fix?.heading ?? null, accuracy: fix?.accuracy ?? null } : null,
     };
-  }, [navigating, session.route, session.plan, session.stops, session.nav, plan, selected, stops, nearbyAlerts, here?.lat, here?.lon]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [navigating, session.route, session.plan, session.stops, session.nav, plan, selected, stops, nearbyAlerts, here?.lat, here?.lon, fix?.accuracy]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const panelStyle = wide ? [styles.sidePanel, { top: insets.top + 84 }] : [styles.bottomPanel, { paddingBottom: insets.bottom + 10 }];
 
@@ -268,7 +273,7 @@ export default function MapScreen() {
           ) : null}
           {reporting ? (
             <View style={panelStyle}>
-              <ReportSheet onReport={report} onClose={() => setReporting(false)} />
+              <ReportSheet accuracy={reportAccuracy} onReport={report} onClose={() => setReporting(false)} />
             </View>
           ) : (
             <NavBottomBar
@@ -307,7 +312,7 @@ export default function MapScreen() {
                 }}
               />
             ) : reporting ? (
-              <ReportSheet onReport={report} onClose={() => setReporting(false)} />
+              <ReportSheet accuracy={reportAccuracy} onReport={report} onClose={() => setReporting(false)} />
             ) : plan ? (
               <RouteSheet
                 plan={plan}

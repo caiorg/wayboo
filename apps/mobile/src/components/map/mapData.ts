@@ -1,6 +1,7 @@
 import type { Coord, LatLon, RoadAlert, SlowSpot } from '@wayboo/core';
 import type { FeatureCollection } from 'geojson';
 import { ALERT_SEVERITY, groupAlerts, severityRank } from '@/lib/alertGroups';
+import { metersToPixelsAtZoom22 } from '@/lib/gpsAccuracy';
 import { ALERT_COLORS, ALERT_ICONS, type Theme } from '@/lib/theme';
 
 export interface MapRoute {
@@ -15,7 +16,8 @@ export interface MapData {
   slowSpots: SlowSpot[];
   destination: LatLon | null;
   stops: LatLon[];
-  puck: { lat: number; lon: number; heading: number | null } | null;
+  /** `accuracy`: raio de incerteza do GPS em metros, desenhado em volta da bolinha. */
+  puck: { lat: number; lon: number; heading: number | null; accuracy?: number | null } | null;
 }
 
 export type CameraCommand =
@@ -99,7 +101,16 @@ export function buildSources(data: MapData): Record<keyof typeof SOURCE, Feature
           geometry: { type: 'Point' as const, coordinates: [s.lon, s.lat] },
         })),
         ...(data.puck
-          ? [{ type: 'Feature' as const, properties: { kind: 'puck' }, geometry: { type: 'Point' as const, coordinates: [data.puck.lon, data.puck.lat] } }]
+          ? [
+              {
+                type: 'Feature' as const,
+                properties: {
+                  kind: 'puck',
+                  ...(data.puck.accuracy != null ? { accuracyPx22: metersToPixelsAtZoom22(data.puck.accuracy, data.puck.lat) } : {}),
+                },
+                geometry: { type: 'Point' as const, coordinates: [data.puck.lon, data.puck.lat] },
+              },
+            ]
           : []),
       ],
     },
@@ -197,10 +208,28 @@ export function layerSpecs(theme: Theme) {
       paint: { 'icon-translate': badgeOffset },
     },
     {
+      // Círculo de incerteza em metros: o raio em pixels dobra a cada nível de zoom.
+      id: 'points-accuracy',
+      source: SOURCE.points,
+      type: 'circle' as const,
+      filter: ['all', ['==', ['get', 'kind'], 'puck'], ['has', 'accuracyPx22']],
+      paint: {
+        'circle-radius': ['interpolate', ['exponential', 2], ['zoom'], 0, 0, 22, ['get', 'accuracyPx22']],
+        'circle-color': theme.primary,
+        'circle-opacity': 0.12,
+        'circle-stroke-color': theme.primary,
+        'circle-stroke-opacity': 0.45,
+        'circle-stroke-width': 1,
+        'circle-pitch-alignment': 'map',
+        'circle-pitch-scale': 'map',
+      },
+    },
+    {
+      // Sem precisão (navegação, que mostra o ponto na rota), fica o halo fixo de antes.
       id: 'points-halo',
       source: SOURCE.points,
       type: 'circle' as const,
-      filter: ['==', ['get', 'kind'], 'puck'],
+      filter: ['all', ['==', ['get', 'kind'], 'puck'], ['!', ['has', 'accuracyPx22']]],
       paint: { 'circle-radius': 22, 'circle-color': theme.primary, 'circle-opacity': 0.18 },
     },
     {
