@@ -199,8 +199,9 @@ export default function MapScreen() {
     void startNavigation(plan, selected, simulate);
   };
 
-  // Na simulação o ponto do reporte não vem do GPS, então a precisão dele não conta.
-  const reportAccuracy = checkReportAccuracy(session.simulated ? null : fix?.accuracy);
+  // Com a simulação ativa, o ponto do reporte (`session.nav`) não vem do GPS e a precisão não conta.
+  // `simulated` sozinho não basta: continua true depois de dispensar a sessão, quando o ponto volta a ser `here`.
+  const reportAccuracy = checkReportAccuracy(session.nav && session.simulated ? null : fix?.accuracy);
 
   const report = async (type: RoadAlert['type']) => {
     setReporting(false);
