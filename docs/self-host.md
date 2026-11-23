@@ -41,7 +41,7 @@ Os números do Planetiler vêm do README do projeto, e os do Photon, do README d
 
 Medido: API, Valhalla, Photon e gateway com Andorra rodam numa máquina com 8 GB de RAM. Estimativa, sem medição: para o Brasil, planeje SSD e pelo menos 16 GB de RAM, por causa do índice `south-america` do Photon e do build do Valhalla.
 
-Precisa também de Docker com o Compose v2 e de acesso à internet durante o preparo.
+Precisa também de Docker com o Compose v2 (no Linux, Docker Engine 20.10 ou mais novo) e de acesso à internet durante o preparo.
 
 ## Instalação
 
@@ -86,7 +86,7 @@ O serviço `api` lê o `.env` (`env_file`). Todas as variáveis da API são opci
 | `GPS_RETENTION_HOURS` | `24` | Horas que o servidor guarda o rastro GPS, os planos e os alertas expirados. Com `0`, a próxima rodada de limpeza, que roda ao subir a API e a cada hora, apaga o rastro das viagens encerradas. O rastro de uma viagem ativa fica enquanto ela enviar amostras e só sai depois de mais de 24 horas sem envio. Valor não numérico ou negativo impede a API de subir. O que cada tabela guarda está em [`docs/privacidade.md`](privacidade.md). |
 | `AI_PROVIDER` | detectado pela chave | `anthropic`, `openai`, `ollama`, `openrouter` ou `none`. Sem valor, a API usa o provedor da chave presente (`ANTHROPIC_API_KEY` ou `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, nessa ordem) e, sem chave, desliga a IA. |
 | `AI_MODEL` | `claude-opus-5-5` com `anthropic` | Obrigatório com `openai`, `ollama` e `openrouter`. |
-| `AI_BASE_URL` | `http://localhost:11434/v1` com `ollama`, `https://openrouter.ai/api/v1` com `openrouter` | Dentro do contêiner, `localhost` é o próprio contêiner. Para um Ollama na máquina, use `http://host.docker.internal:11434/v1` (no Linux, ver [Ollama na mesma máquina](#ollama-na-mesma-máquina)). |
+| `AI_BASE_URL` | `http://localhost:11434/v1` com `ollama`, `https://openrouter.ai/api/v1` com `openrouter` | Dentro do contêiner, `localhost` é o próprio contêiner. Para um Ollama na máquina, use `http://host.docker.internal:11434/v1` (ver [Ollama na mesma máquina](#ollama-na-mesma-máquina)). |
 | `AI_TIMEOUT_MS` | `15000` | Tempo máximo de cada chamada ao modelo. |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `OLLAMA_API_KEY` | sem padrão (`OLLAMA_API_KEY`: `ollama`) | Chave do provedor. Uma chave remota faz a API chamar serviço externo (ver [O que ainda chama serviço externo](#o-que-ainda-chama-serviço-externo)). |
 | `SUGGESTION_ROUTE_MAX_AGE_MIN` | `1440` | Minutos em que `/suggestions` reaproveita a rota habitual guardada antes de pedir outra ao Valhalla. |
@@ -124,16 +124,24 @@ Se o endereço do passo 2 for público, inclua-o também em `TRUST_PROXY` no `do
 
 ### Ollama na mesma máquina
 
-O Docker Desktop cria `host.docker.internal`. O Docker Engine no Linux não cria, e o `docker-compose.yml` não define esse nome. No Linux, crie um `docker-compose.override.yml` na raiz (requer Docker Engine 20.10 ou mais novo):
+Use `AI_BASE_URL=http://host.docker.internal:11434/v1`. O serviço `api` do `docker-compose.yml` mapeia esse nome para a máquina com `extra_hosts: host.docker.internal:host-gateway`, então ele resolve no Linux sem arquivo extra. O Docker Desktop já cria o nome, e nele `host-gateway` aponta para o mesmo endereço do host. No Docker Engine do Linux, `host-gateway` vira o IP da interface `docker0`, a bridge padrão (em geral `172.17.0.1`). O Docker Engine aceita esse valor a partir da versão 20.10.
 
-```yaml
-services:
-  api:
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+A variável `HOST_GATEWAY` do `.env` troca esse destino por um IP. Ela vale para qualquer instalação, com ou sem Ollama, porque o Docker recusa criar a API quando não consegue resolver `host-gateway`:
+
+- Daemon sem bridge padrão (`"bridge": "none"` no `daemon.json`) e sem `host-gateway-ip`: defina `host-gateway-ip` no `daemon.json` com um IP da máquina, que não muda, e reinicie o Docker (`sudo systemctl restart docker`) para o daemon ler a mudança. Ou use em `HOST_GATEWAY` o gateway da rede do Compose (`docker network inspect wayboo_default --format '{{(index .IPAM.Config 0).Gateway}}'`). Esse gateway pode mudar quando a rede é recriada (por exemplo, após `docker compose down`). Nesse caso, suba a stack com `docker compose up -d`, que recria a rede, confira o novo gateway, atualize o `.env` e rode `docker compose up -d api`.
+- Docker rootless com `slirp4netns`: `host-gateway` aponta para a bridge dentro do namespace do daemon, não para a máquina ([moby/moby#47684](https://github.com/moby/moby/issues/47684)). Use em `HOST_GATEWAY` o IP da máquina na rede local, com o Ollama escutando nesse IP ou em `0.0.0.0`. O `slirp4netns` abre a conexão a partir da própria máquina, então ela passa pelo `ufw` sem regra extra, e a regra abaixo não se aplica. Não desligue a proteção do loopback do rootless (`DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false`). Isso deixaria qualquer contêiner alcançar todos os serviços da máquina em `127.0.0.1`, não só o Ollama.
+
+Depois de mudar `HOST_GATEWAY`, rode `docker compose up -d api`.
+
+Por padrão, o Ollama escuta só em `127.0.0.1:11434`, que o contêiner não alcança no Docker Engine comum. Defina `OLLAMA_HOST=0.0.0.0:11434` no serviço do Ollama. Isso abre a porta 11434 para a rede: restrinja o acesso a ela no firewall da máquina, porque o Ollama não pede autenticação. Se o firewall bloqueia conexões de entrada por padrão (o `ufw`, por exemplo), libere a 11434 só para a interface e a sub-rede da rede do Compose. Uma faixa ampla como `172.16.0.0/12` também cobre máquinas da LAN que usem endereços nela. Com a stack no ar:
+
+```sh
+net=$(docker network inspect wayboo_default --format '{{.Id}}')
+subnet=$(docker network inspect wayboo_default --format '{{(index .IPAM.Config 0).Subnet}}')
+sudo ufw allow in on "br-$(printf '%.12s' "$net")" from "$subnet" to any port 11434 proto tcp
 ```
 
-Por padrão, o Ollama escuta só em `127.0.0.1:11434`, que o contêiner não alcança no Linux. Defina `OLLAMA_HOST=0.0.0.0:11434` no serviço do Ollama. Isso abre a porta 11434 para a rede: restrinja o acesso a ela no firewall da máquina, porque o Ollama não pede autenticação.
+A interface `br-…` e a sub-rede mudam se a rede for recriada (por exemplo, após `docker compose down`). Nesse caso, apague a regra antiga com `sudo ufw delete` e crie de novo. Se `HOST_GATEWAY` usa o gateway dessa rede, atualize-o também.
 
 ## HTTPS
 
