@@ -29,17 +29,21 @@ export default function SettingsScreen() {
   const [deviceConfirm, setDeviceConfirm] = useState<string | null>(null);
   const [deviceBusy, setDeviceBusy] = useState<string | null>(null);
   const [deviceMsg, setDeviceMsg] = useState<string | null>(null);
-  // Só a consulta mais recente vale: a resposta de um servidor anterior não substitui a lista atual.
+  // Só a consulta mais recente vale, e só para o servidor e a identidade em que começou:
+  // a resposta de um servidor anterior ou do usuário antigo não substitui a lista atual.
   const devicesGen = useRef(0);
+  const identity = () => `${normalizeApiUrl(useSettings.getState().apiUrl)} ${useSettings.getState().userId}`;
 
   const loadDevices = async () => {
     const gen = ++devicesGen.current;
+    const started = identity();
+    const current = () => gen === devicesGen.current && started === identity();
     try {
       const { devices: list } = await api.devices();
       // Este aparelho primeiro; o servidor ordena por data de registro.
-      if (gen === devicesGen.current) setDevices(list.sort((x, y) => Number(y.current) - Number(x.current)));
+      if (current()) setDevices(list.sort((x, y) => Number(y.current) - Number(x.current)));
     } catch {
-      if (gen !== devicesGen.current) return;
+      if (!current()) return;
       setDevices(null);
       setDeviceMsg('Não foi possível ler os aparelhos no servidor.');
     }
@@ -148,6 +152,18 @@ export default function SettingsScreen() {
     // Testa a conexão uma vez ao abrir.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // A identidade mudou (dados apagados, saída ou token revogado em outro aparelho): a lista era do usuário antigo.
+  const shownIdentity = useRef(s.userId);
+  useEffect(() => {
+    if (shownIdentity.current === s.userId) return;
+    shownIdentity.current = s.userId;
+    devicesGen.current++;
+    setDevices(null);
+    setDeviceConfirm(null);
+    void loadDevices();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s.userId]);
 
   const row = (label: string, value: boolean, onChange: (v: boolean) => void, hint?: string) => (
     <View style={styles.row}>
