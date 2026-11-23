@@ -121,6 +121,8 @@ beforeEach(() => {
   );
 });
 afterEach(() => {
+  // Descarta um `mockImplementationOnce` que sobrou de um teste que falhou antes de consumi-lo.
+  vi.mocked(currentWeather).mockReset();
   vi.unstubAllGlobals();
   vi.useRealTimers();
   Object.assign(config.suggestions, defaults);
@@ -260,7 +262,9 @@ describe('cache das sugestões de rotina', () => {
     expect(del.statusCode).toBe(200);
     release();
 
-    expect((await pending).statusCode).toBe(409);
+    const res = await pending;
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error: 'Dados do usuário apagados durante o planejamento' });
     expect(routerCalls).toHaveBeenCalledTimes(1);
     const rows = (table: string) => (db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE user_id = ?`).get(open.userId) as { n: number }).n;
     expect(rows('plans')).toBe(0);
