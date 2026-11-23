@@ -10,7 +10,7 @@ import { ArrivalCard, ReportSheet, SuggestionCard } from '@/components/Panels';
 import { RouteSheet } from '@/components/RouteSheet';
 import { SearchPanel } from '@/components/SearchPanel';
 import { Card, IconButton, T } from '@/components/ui';
-import { api, type GeocodeResult } from '@/lib/api';
+import { api, RegistrationLimitError, type GeocodeResult } from '@/lib/api';
 import { checkReportAccuracy } from '@/lib/gpsAccuracy';
 import { startLocation, useLocationStore } from '@/lib/location';
 import { dismissSession, startNavigation, stopNavigation, toggleMute, useNavSession } from '@/lib/navigation';
@@ -55,6 +55,17 @@ export default function MapScreen() {
     setToast(text);
     setTimeout(() => setToast((cur) => (cur === text ? null : cur)), 4500);
   }, []);
+  // Sugestões e alertas falham em silêncio, mas costumam ser as chamadas que registram o aparelho.
+  // O 429 do registro aparece uma vez por bloqueio, não a cada recarga dos alertas.
+  const shownLimit = useRef(0);
+  const backgroundError = useCallback(
+    (e: unknown) => {
+      if (!(e instanceof RegistrationLimitError) || e.retryAt === shownLimit.current) return;
+      shownLimit.current = e.retryAt;
+      notify(e.message);
+    },
+    [notify],
+  );
 
   const here: LatLon | null = fix ? { lat: fix.lat, lon: fix.lon } : null;
   const hereKey = here ? `${here.lat.toFixed(3)},${here.lon.toFixed(3)}` : null;
@@ -82,8 +93,11 @@ export default function MapScreen() {
     api
       .suggestions({ lat, lon })
       .then((r) => setSuggestions(r.suggestions))
-      .catch(() => setSuggestions([]));
-  }, [hereKey, plan, session.status]);
+      .catch((e) => {
+        setSuggestions([]);
+        backgroundError(e);
+      });
+  }, [hereKey, plan, session.status, backgroundError]);
 
   // Alertas da comunidade ao redor, atualizados a cada minuto.
   useEffect(() => {
@@ -93,11 +107,11 @@ export default function MapScreen() {
       api
         .alerts({ minLat: lat - 0.06, minLon: lon - 0.06, maxLat: lat + 0.06, maxLon: lon + 0.06 })
         .then((r) => setNearbyAlerts(r.alerts))
-        .catch(() => undefined);
+        .catch(backgroundError);
     void load();
     const id = setInterval(load, 60_000);
     return () => clearInterval(id);
-  }, [hereKey]);
+  }, [hereKey, backgroundError]);
 
   const fitPlan = useCallback(
     (p: PlanResponse) => {
