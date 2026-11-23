@@ -1,7 +1,7 @@
 import type { Brief, LatLon, PlanResponse, RoadAlert, StopSuggestion, Suggestion } from '@wayboo/core';
 import { useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
+import { AccessibilityInfo, Platform, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MapView } from '@/components/map/MapView';
 import type { CameraCommand, MapData } from '@/components/map/mapData';
@@ -53,6 +53,8 @@ export default function MapScreen() {
   const command = useCallback((c: CameraCommand) => setCamera({ ...c, nonce: ++nonce.current }), []);
   const notify = useCallback((text: string) => {
     setToast(text);
+    // iOS e Android não anunciam o toast sozinhos; na web, o `role="alert"` dele já anuncia.
+    if (Platform.OS !== 'web') AccessibilityInfo.announceForAccessibility(text);
     setTimeout(() => setToast((cur) => (cur === text ? null : cur)), 4500);
   }, []);
   // Sugestões e alertas falham em silêncio, mas costumam ser as chamadas que registram o aparelho.
@@ -362,7 +364,7 @@ export default function MapScreen() {
       )}
 
       {toast ? (
-        <View style={[styles.toast, { top: insets.top + (navigating ? 150 : 80) }]} pointerEvents="none">
+        <View role="alert" style={[styles.toast, { top: insets.top + (navigating ? 150 : 80) }]} pointerEvents="none">
           <Card style={{ paddingVertical: 10 }}>
             <T variant="caption" color={t.text}>
               {toast}
