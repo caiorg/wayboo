@@ -4,11 +4,17 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { buildApp } from '../src/app';
 import { config } from '../src/config';
 import { db, getPlaces, getRoutineRoutes, newPlace, saveRoutine, saveRoutineRoutes, upsertPlace } from '../src/db';
+import { currentWeather } from '../src/providers/geo-services';
 
 // Espião em `getPlaces` para saber quando um pedido de `/suggestions` chegou a `routinePlan` (ver `concurrently`).
 vi.mock('../src/db', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/db')>();
   return { ...actual, getPlaces: vi.fn(actual.getPlaces) };
+});
+// Espião em `currentWeather`: o clima fica em cache por lugar, então segurar o `fetch` não basta para prender a espera.
+vi.mock('../src/providers/geo-services', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/providers/geo-services')>();
+  return { ...actual, currentWeather: vi.fn(actual.currentWeather) };
 });
 
 const TZ = 'America/Sao_Paulo';
@@ -141,7 +147,7 @@ async function commuter() {
     expect(res.statusCode).toBe(200);
     return res.json<{ suggestions: Suggestion[] }>().suggestions;
   };
-  return Object.assign(open, { request });
+  return Object.assign(open, { request, userId, token });
 }
 
 describe('cache das sugestões de rotina', () => {
@@ -232,5 +238,32 @@ describe('cache das sugestões de rotina', () => {
     expect(routerCalls).toHaveBeenCalledTimes(2);
     await open(nearby);
     expect(routerCalls).toHaveBeenCalledTimes(2);
+  });
+
+  it('não grava o plano da rota guardada quando DELETE /me chega durante a espera do clima', async () => {
+    const open = await commuter();
+    await open();
+    expect(routerCalls).toHaveBeenCalledTimes(1);
+
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => (entered = resolve));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    vi.mocked(currentWeather).mockImplementationOnce(async () => {
+      entered();
+      await gate;
+      return null;
+    });
+    const pending = open.request();
+    await waiting;
+    const del = await app.inject({ method: 'DELETE', url: '/me', headers: { authorization: `Bearer ${open.token}` } });
+    expect(del.statusCode).toBe(200);
+    release();
+
+    expect((await pending).statusCode).toBe(409);
+    expect(routerCalls).toHaveBeenCalledTimes(1);
+    const rows = (table: string) => (db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE user_id = ?`).get(open.userId) as { n: number }).n;
+    expect(rows('plans')).toBe(0);
+    expect(rows('routine_routes')).toBe(0);
   });
 });
