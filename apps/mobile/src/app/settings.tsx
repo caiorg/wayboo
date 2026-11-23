@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ScrollView, StyleSheet, Switch, TextInput, View } from 'react-native';
 import { Button, Card, Chip, T } from '@/components/ui';
 import { api, ApiError, LocalSaveError, type DeviceInfo } from '@/lib/api';
@@ -29,12 +29,17 @@ export default function SettingsScreen() {
   const [deviceConfirm, setDeviceConfirm] = useState<string | null>(null);
   const [deviceBusy, setDeviceBusy] = useState<string | null>(null);
   const [deviceMsg, setDeviceMsg] = useState<string | null>(null);
+  // Só a consulta mais recente vale: a resposta de um servidor anterior não substitui a lista atual.
+  const devicesGen = useRef(0);
 
   const loadDevices = async () => {
+    const gen = ++devicesGen.current;
     try {
+      const { devices: list } = await api.devices();
       // Este aparelho primeiro; o servidor ordena por data de registro.
-      setDevices((await api.devices()).devices.sort((x, y) => Number(y.current) - Number(x.current)));
+      if (gen === devicesGen.current) setDevices(list.sort((x, y) => Number(y.current) - Number(x.current)));
     } catch {
+      if (gen !== devicesGen.current) return;
       setDevices(null);
       setDeviceMsg('Não foi possível ler os aparelhos no servidor.');
     }
@@ -122,6 +127,8 @@ export default function SettingsScreen() {
       setExportResult(null);
       setDeviceConfirm(null);
       setDeviceMsg(null);
+      devicesGen.current++;
+      setDevices(null);
     }
     s.set({ apiUrl: nextUrl });
     setStatus('Testando…');

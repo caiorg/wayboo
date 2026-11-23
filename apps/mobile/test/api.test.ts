@@ -227,7 +227,7 @@ describe('apagar os dados', () => {
 });
 
 describe('aparelhos', () => {
-  it('token revogado em outro aparelho: grava um token novo e segue como usuário novo', async () => {
+  it('token revogado em outro aparelho: vira usuário novo e não repete a chamada do usuário antigo', async () => {
     const server = fakeServer();
     vi.stubGlobal('fetch', server.fetch);
     const { api } = await import('../src/lib/api');
@@ -238,12 +238,18 @@ describe('aparelhos', () => {
     const before = useSettings.getState().credentials[url]!;
     server.revoked.add(before.token);
 
-    await expect(api.privacy()).resolves.toEqual({ shareCrowd: false });
+    // O DELETE era do usuário antigo: com o token novo, apagaria os dados do usuário novo.
+    await expect(api.deleteMyData()).rejects.toThrow(/desconectado/);
     const after = useSettings.getState().credentials[url]!;
     expect(after.token).not.toBe(before.token);
     expect(after.userId).not.toBe(before.userId);
+    expect(after.userId).toBe(useSettings.getState().userId);
     expect(server.registered).toEqual([before.userId, after.userId]);
+    expect(server.calls.filter((c) => c.token === after.token)).toEqual([]);
+
+    await expect(api.privacy()).resolves.toEqual({ shareCrowd: false });
     expect(server.calls.at(-1)).toEqual({ route: 'GET /privacy', token: after.token });
+    expect(server.registered).toHaveLength(2);
   });
 
   it('sair descarta a credencial e o id local; a próxima chamada registra um usuário novo', async () => {

@@ -89,6 +89,10 @@ function newToken(): string {
 /** A identidade em que a chamada começou foi descartada por `deleteMyData`. */
 const identityReset = () => new ApiError(0, 'Os dados deste aparelho foram apagados durante a chamada. Tente de novo.');
 
+/** O token foi revogado em outro aparelho, e este passou a ser um usuário novo. */
+const deviceRevoked = () =>
+  new ApiError(401, 'Este aparelho foi desconectado em outro aparelho e agora é um usuário novo, sem o histórico. Tente de novo.');
+
 /**
  * Um registro em andamento por servidor; nunca compartilhado entre URLs. `userId` é o id local
  * quando o registro começou: depois de `resetIdentity`, o registro antigo não vale mais.
@@ -99,8 +103,9 @@ const registering = new Map<string, { userId: string; token: Promise<string> }>(
  * Token deste aparelho para `baseUrl`. Sem registro confirmado, grava um token novo (ou reusa o
  * gravado) e o registra. O registro é idempotente, então repetir após uma resposta perdida
  * devolve o mesmo usuário. Envia o `userId` local para o servidor adotar os dados já gravados nele.
- * Token revogado em outro aparelho: o servidor nunca mais o aceita, então o aparelho grava um token
- * novo e o registra. O id antigo continua reivindicado no servidor, e o aparelho vira um usuário novo.
+ * Token revogado em outro aparelho: o servidor nunca mais o aceita. O aparelho troca de id (como
+ * depois de apagar os dados), grava um token novo e o registra como usuário novo. A chamada em curso
+ * era do usuário antigo e falha em vez de seguir com o novo; as próximas usam a credencial nova.
  */
 async function deviceToken(baseUrl: string): Promise<string> {
   await hydrated();
@@ -111,25 +116,27 @@ async function deviceToken(baseUrl: string): Promise<string> {
   if (pending?.userId === localId) return pending.token;
   const token = saved?.token ?? newToken();
   if (!saved) useSettings.getState().setCredential(baseUrl, { token });
-  const register = async (t: string) => {
-    const { userId } = await send<{ userId: string }>(baseUrl, 'POST', '/auth/device', { token: t, legacyUserId: localId }, 15000, null);
-    return { userId, token: t };
-  };
+  const register = (t: string, legacyUserId: string) =>
+    send<{ userId: string }>(baseUrl, 'POST', '/auth/device', { token: t, legacyUserId }, 15000, null);
   const entry = {
     userId: localId,
-    token: register(token)
-      .catch((e: unknown) => {
+    token: register(token, localId)
+      .catch(async (e: unknown): Promise<never> => {
         if (!(e instanceof ApiError) || e.status !== 401) throw e;
         if (useSettings.getState().userId !== localId) throw identityReset();
+        useSettings.getState().resetIdentity(baseUrl);
+        const newId = useSettings.getState().userId;
         const fresh = newToken();
         useSettings.getState().setCredential(baseUrl, { token: fresh });
-        return register(fresh);
+        const { userId } = await register(fresh, newId);
+        if (useSettings.getState().userId === newId) useSettings.getState().setCredential(baseUrl, { token: fresh, userId });
+        throw deviceRevoked();
       })
-      .then(({ userId, token: registered }) => {
+      .then(({ userId }) => {
         // Resposta que chega depois de apagar os dados: o token descartado não grava nem é usado.
         if (useSettings.getState().userId !== localId) throw identityReset();
-        useSettings.getState().setCredential(baseUrl, { token: registered, userId });
-        return registered;
+        useSettings.getState().setCredential(baseUrl, { token, userId });
+        return token;
       })
       .finally(() => {
         if (registering.get(baseUrl) === entry) registering.delete(baseUrl);
