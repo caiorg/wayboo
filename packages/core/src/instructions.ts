@@ -1,5 +1,11 @@
 import type { Maneuver } from './types';
 
+/**
+ * Idioma (BCP 47) das instruções de navegação: os verbos abaixo, o texto que o Valhalla devolve e as frases que o
+ * app fala. A voz do app segue este valor, não o idioma do aparelho.
+ */
+export const INSTRUCTION_LANGUAGE = 'pt-BR';
+
 /** Verbos em pt-BR por tipo de manobra do Valhalla. */
 const VERB: Record<number, string> = {
   1: 'Siga',
