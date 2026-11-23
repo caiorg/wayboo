@@ -19,11 +19,13 @@ import {
  *   trecho × tipo de dia × horário (do usuário)
  *     → trecho × tipo de dia × horário (de todos os usuários, "crowd")
  *       → trecho × tipo de dia em qualquer horário (usuário, depois crowd)
- *         → padrão geral do usuário naquele tipo de dia e horário
- *           → 0 (confia no roteador)
+ *         → trecho no outro dia de fim de semana, com peso menor (só sábado e domingo)
+ *           → padrão geral do usuário naquele tipo de dia e horário
+ *             → 0 (confia no roteador)
  *
  * Cada nível encolhe em direção ao de baixo quando tem poucas observações.
- * Nenhum nível mistura tipos de dia: sem viagens de domingo, o domingo não herda o pico dos dias úteis.
+ * Dia útil nunca entra no fim de semana nem o contrário: sem viagens de domingo, o domingo
+ * não herda o pico dos dias úteis. Sábado e domingo emprestam um ao outro.
  * Por cima disso entram fatores de contexto aprendidos (chuva, visibilidade,
  * alertas) e um resíduo por rotina origem→destino (ex.: tempo para estacionar).
  */
@@ -70,6 +72,11 @@ export function activeFlags(ctx: TripContext): ContextFlag[] {
 }
 
 const ROOT: Shrunk = { mean: 0, variance: 0.05, w: 0 };
+
+/** Outro dia de fim de semana. Dia útil não tem vizinho. */
+const WEEKEND_SIBLING: Partial<Record<DayType, DayType>> = { saturday: 'sunday', sunday: 'saturday' };
+/** Uma observação do outro dia de fim de semana vale metade de uma do próprio dia. */
+export const WEEKEND_SIBLING_WEIGHT = 0.5;
 const MIN_LEARN_BASE_S = 2;
 
 export interface EtaInput {
@@ -131,7 +138,22 @@ export function estimateSegment(
   now: number,
 ): SegmentEstimate {
   const g = globalPrior(user, d, bin, now);
-  const crowdSeg = shrink(dayStat(crowd, seg, d, now), g, 4, now);
+  const sib = WEEKEND_SIBLING[d];
+  const sibling = sib
+    ? shrink(
+        pool(
+          [
+            { s: dayStat(user, seg, sib, now), weight: WEEKEND_SIBLING_WEIGHT },
+            { s: dayStat(crowd, seg, sib, now), weight: WEEKEND_SIBLING_WEIGHT },
+          ],
+          now,
+        ),
+        g,
+        1,
+        now,
+      )
+    : g;
+  const crowdSeg = shrink(dayStat(crowd, seg, d, now), sibling, 4, now);
   const userSeg = shrink(dayStat(user, seg, d, now), crowdSeg, 3, now);
   const crowdBin = shrink(pool(neighbors(crowd, seg, d, bin), now), userSeg, 3, now);
   const userBin = shrink(pool(neighbors(user, seg, d, bin), now), crowdBin, 2, now);

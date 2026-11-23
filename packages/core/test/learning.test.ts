@@ -300,6 +300,69 @@ describe('ETA aprendido', () => {
     expect(sunday.confidence).toBeLessThan(weekday.confidence);
   });
 
+  it('sem viagens de sábado, o ETA de sábado encolhe rumo ao domingo, nunca rumo ao dia útil (e vice-versa)', () => {
+    const r = makeRoute('r', HOME, WORK);
+    const train = (seed: number, factorOf: (d: 'weekday' | 'saturday' | 'sunday') => number | null) => {
+      const rnd = mulberry(seed);
+      const user: StatsMap = new Map();
+      const crowd: StatsMap = new Map();
+      // Quatro semanas, sempre às 8h.
+      for (let day = 0; day < 28; day++) {
+        const depart = at(day, 8, 0);
+        const factor = factorOf(localTime(depart, TZ).dayType);
+        if (factor === null) continue;
+        const truth = r.segments.map((s) => s.baseDurationS * factor * (0.95 + rnd() * 0.1));
+        const trace = analyzeTrace(r, [...simulateDrive(r, truth, depart, 1, 3, rnd)]);
+        const learned = learnFromTrip({ route: r, observations: trace.observations, departAt: depart, timeZone: TZ, user, crowd, ctx: NO_CTX });
+        for (const [k, v] of learned.user) user.set(k, v);
+        for (const [k, v] of learned.crowd) crowd.set(k, v);
+      }
+      return (epoch: number) => predictEta({ route: r, departAt: epoch, timeZone: TZ, user, crowd, ctx: NO_CTX }).durationS;
+    };
+    const saturdayAt = at(33, 8, 0);
+    const sundayAt = at(34, 8, 0);
+    expect(localTime(saturdayAt, TZ).dayType).toBe('saturday');
+    expect(localTime(sundayAt, TZ).dayType).toBe('sunday');
+    const base = r.baseDurationS;
+
+    // Pico 2x nos dias úteis, 1,5x aos domingos, nenhuma viagem de sábado.
+    const noSaturday = train(17, (d) => (d === 'weekday' ? 2 : d === 'sunday' ? 1.5 : null));
+    const sat = noSaturday(saturdayAt);
+    const sun = noSaturday(sundayAt);
+    expect(sun / base).toBeGreaterThan(1.4);
+    expect(Math.abs(sat - sun)).toBeLessThan(Math.abs(sat - base));
+    // O domingo empresta menos peso que o próprio sábado teria: o sábado fica entre o roteador e o domingo.
+    expect(sat).toBeLessThan(sun);
+    expect(sat / base).toBeLessThan(1.5);
+
+    // Simétrico: sem domingos, o domingo encolhe rumo ao sábado.
+    const noSunday = train(19, (d) => (d === 'weekday' ? 2 : d === 'saturday' ? 1.5 : null));
+    const sun2 = noSunday(sundayAt);
+    const sat2 = noSunday(saturdayAt);
+    expect(Math.abs(sun2 - sat2)).toBeLessThan(Math.abs(sun2 - base));
+    expect(sun2).toBeLessThan(sat2);
+  });
+
+  it('com dados do próprio tipo de dia, o outro dia de fim de semana pesa menos', () => {
+    const now = at(5, 12, 0);
+    const saturdayOnly: StatsMap = new Map([
+      [statKey.segBin('x', 'saturday', 20), observe(undefined, 0.2, now, 3)],
+      // Dia útil nunca entra no fim de semana.
+      [statKey.segBin('x', 'weekday', 20), observe(undefined, 2, now, 30)],
+    ]);
+    const withSunday: StatsMap = new Map([...saturdayOnly, [statKey.segBin('x', 'sunday', 20), observe(undefined, 0.8, now, 3)]]);
+    const alone = estimateSegment('x', 'saturday', 20, saturdayOnly, new Map(), now);
+    const sat = estimateSegment('x', 'saturday', 20, withSunday, new Map(), now);
+    // O domingo puxa o sábado para cima, mas com o mesmo peso de dados o sábado continua mais perto dos próprios 0,2.
+    expect(sat.mean).toBeGreaterThan(alone.mean);
+    expect(sat.mean).toBeLessThan((0.2 + 0.8) / 2);
+    // A confiança não sobe com dados de outro tipo de dia.
+    expect(sat.userW).toBeCloseTo(alone.userW, 9);
+    // Dia útil não tem vizinho de fim de semana.
+    const weekdayOnlySunday = estimateSegment('y', 'weekday', 20, new Map([[statKey.segBin('y', 'sunday', 20), observe(undefined, 0.8, now, 30)]]), new Map(), now);
+    expect(weekdayOnlySunday.mean).toBe(0);
+  });
+
   it('sem dados no horário, usa a média do trecho no mesmo tipo de dia, somando horários distantes', () => {
     const now = at(0, 12, 0);
     const DAY = 86_400_000;
