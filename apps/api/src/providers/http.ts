@@ -42,6 +42,9 @@ export function ttlCache<V>(ttlMs: number, max = 2000) {
       }
       return e.v;
     },
+    clear() {
+      map.clear();
+    },
     set(k: string, v: V) {
       if (map.size >= max) map.delete(map.keys().next().value!);
       map.set(k, { v, exp: Date.now() + ttlMs });

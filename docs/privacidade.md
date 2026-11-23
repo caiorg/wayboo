@@ -11,7 +11,7 @@ O app gera um token aleatório de 256 bits e o registra em `POST /auth/device`. 
 | Tabela | O que tem | Para quê | Prazo |
 | --- | --- | --- | --- |
 | `samples` | Rastro GPS bruto: horário, latitude, longitude, velocidade, rumo e precisão de cada ponto | Medir quanto cada trecho demorou ao encerrar a viagem | Apagado `GPS_RETENTION_HOURS` horas depois do fim da viagem (padrão 24). Viagem nunca encerrada conta como abandonada 24 horas (ou o prazo, se maior) depois do último envio de amostras, pelo relógio do servidor. Sem nenhum envio, o prazo conta do início da viagem |
-| `plans` | Pedido de rota: origem, destino, rotas sugeridas com geometria e contexto | Iniciar a viagem e gerar o resumo do copiloto | Sem viagem: `GPS_RETENTION_HOURS` horas depois de criado, na rodada de limpeza; cada plano novo também apaga os sem viagem com mais de 2 dias. Com viagem: o mesmo prazo do rastro GPS |
+| `plans` | Pedido de rota: origem, destino, rotas sugeridas com geometria e contexto, e o estado e o município da origem usados para os feriados regionais | Iniciar a viagem e gerar o resumo do copiloto | Sem viagem: `GPS_RETENTION_HOURS` horas depois de criado, na rodada de limpeza; cada plano novo também apaga os sem viagem com mais de 2 dias. Com viagem: o mesmo prazo do rastro GPS |
 | `trips`, `trip_legs` | Resumo da viagem: início, fim, duração prevista e real, distância, lugares de origem e destino, erro da previsão | Histórico, estatísticas em `GET /insights` e tempo médio de rotinas | Até o usuário apagar |
 | `stats` | Tempo aprendido por trecho de rua, contexto e par origem-destino (média com decaimento) | Prever o tempo das próximas viagens | Até o usuário apagar |
 | `anomalies` | Trecho, momento, tempo esperado e observado quando a diferença foi grande | Registro; hoje só a contagem aparece no fim da viagem | Até o usuário apagar |
@@ -26,6 +26,19 @@ O app gera um token aleatório de 256 bits e o registra em `POST /auth/device`. 
 ## Dados agregados
 
 Com o opt-in de `PUT /privacy` ligado, a viagem soma ao usuário agregado (`user_id = '*'` em `stats`) só a duração relativa de cada trecho, com o tipo de dia e a faixa de 30 minutos. A data vai sem horário. Não vai rastro, lugar nem `user_id`, então essa contribuição não pode ser separada depois e continua no agregado mesmo após o usuário apagar os dados.
+
+## O que vai para serviços externos
+
+Ao planejar uma rota, a API manda dados de localização a serviços de terceiros, sem identificar o usuário. Cada URL é configurável, e no self-host (`docs/self-host.md`) o roteador e a busca rodam na própria máquina.
+
+| Serviço | Padrão | O que recebe |
+| --- | --- | --- |
+| Roteador (`VALHALLA_URL`) | `valhalla1.openstreetmap.de` | Origem, paradas e destino exatos |
+| Clima (`OPEN_METEO_URL`) | `api.open-meteo.com` | Origem com 3 casas decimais (cerca de 110 m) |
+| Busca (`PHOTON_URL`), feriados regionais | `photon.komoot.io` | Centro da célula geohash de cerca de 1,2 × 0,6 km da origem, no máximo uma vez por célula a cada 7 dias, só em fuso do Brasil. `REGIONAL_HOLIDAYS=off` desliga |
+| Busca (`PHOTON_URL`), `/geocode` e `/reverse` | `photon.komoot.io` | O texto buscado e a coordenada que o app envia |
+
+Nenhum desses envios pede consentimento separado no app. A decisão de exigir opt-in para eles está em aberto.
 
 ## Direitos do titular (LGPD, art. 18)
 

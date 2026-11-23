@@ -4,6 +4,7 @@ import {
   buildSegments,
   createNavigator,
   cumulativeDistances,
+  brazilNationalCalendar,
   brazilNationalHolidays,
   decodePolyline,
   easterSunday,
@@ -29,6 +30,7 @@ import {
   tradeoffs,
   updatePreferences,
   type Coord,
+  type HolidayCalendar,
   type Maneuver,
   type Place,
   type Route,
@@ -273,6 +275,39 @@ describe('ETA aprendido', () => {
     expect(monday.durationS / r.baseDurationS).toBeGreaterThan(1.8);
     expect(carnaval.durationS).toBeLessThan(monday.durationS * 0.7);
     expect(carnaval.durationS / sunday.durationS).toBeCloseTo(1, 1);
+  });
+
+  it('predictEta e learnFromTrip usam o calendário passado (feriado estadual)', () => {
+    const r = makeRoute('r', HOME, WORK);
+    const rnd = mulberry(23);
+    const sp: HolidayCalendar = (d) => brazilNationalCalendar(d) ?? (d.month === 7 && d.day === 9 ? 'Revolução Constitucionalista' : null);
+    const user: StatsMap = new Map();
+    const crowd: StatsMap = new Map();
+    // Junho/2027: pico 2x nos dias úteis, trânsito livre aos domingos.
+    const day = (d: number) => Date.UTC(2027, 5, d, 11, 0);
+    for (let d = 7; d <= 30; d++) {
+      const dt = localTime(day(d), TZ, sp).dayType;
+      if (dt === 'saturday') continue;
+      const truth = r.segments.map((s) => s.baseDurationS * (dt === 'weekday' ? 2 : 1) * (0.95 + rnd() * 0.1));
+      const trace = analyzeTrace(r, [...simulateDrive(r, truth, day(d), 1, 3, rnd)]);
+      const learned = learnFromTrip({ route: r, observations: trace.observations, departAt: day(d), timeZone: TZ, user, crowd, ctx: NO_CTX, calendar: sp });
+      for (const [k, v] of learned.user) user.set(k, v);
+      for (const [k, v] of learned.crowd) crowd.set(k, v);
+    }
+    // 9/7/2027 é sexta-feira: feriado em SP, dia útil no calendário nacional.
+    const july9 = Date.UTC(2027, 6, 9, 11, 0);
+    const inSp = predictEta({ route: r, departAt: july9, timeZone: TZ, user, crowd, ctx: NO_CTX, calendar: sp });
+    const elsewhere = predictEta({ route: r, departAt: july9, timeZone: TZ, user, crowd, ctx: NO_CTX });
+    expect(elsewhere.durationS / r.baseDurationS).toBeGreaterThan(1.7);
+    expect(inSp.durationS / r.baseDurationS).toBeLessThan(1.2);
+
+    // A viagem do feriado aprende no bin de domingo só com o calendário de SP.
+    const truth = r.segments.map((s) => s.baseDurationS);
+    const trace = analyzeTrace(r, [...simulateDrive(r, truth, july9, 1, 3, rnd)]);
+    const base = { route: r, observations: trace.observations, departAt: july9, timeZone: TZ, user: new Map(), crowd: new Map(), ctx: NO_CTX };
+    const days = (m: StatsMap) => new Set([...m.keys()].filter((k) => k.startsWith('sb|')).map((k) => k.split('|')[2]));
+    expect(days(learnFromTrip({ ...base, calendar: sp }).user)).toEqual(new Set(['sunday']));
+    expect(days(learnFromTrip(base).user)).toEqual(new Set(['weekday']));
   });
 
   it('sem viagens de domingo, o ETA de domingo não aplica o pico dos dias úteis', () => {

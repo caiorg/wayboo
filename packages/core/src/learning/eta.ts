@@ -1,4 +1,5 @@
 import type { DayType, EtaEstimate, EtaFactor, Route, TripContext } from '../types';
+import type { HolidayCalendar } from './holidays';
 import {
   BIN_MINUTES,
   BINS_PER_DAY,
@@ -90,6 +91,8 @@ export interface EtaInput {
   odKey?: string | null;
   /** Atraso adicional estimado pelos alertas ativos à frente (s). */
   alertPenaltyS?: number;
+  /** Feriados do lugar da viagem. Sem ele, vale o padrão do fuso (`holidayCalendarFor`). */
+  calendar?: HolidayCalendar;
 }
 
 interface SegmentEstimate {
@@ -168,7 +171,7 @@ export function estimateSegment(
 export function predictEta(input: EtaInput): EtaEstimate {
   const { route, departAt, timeZone, user, crowd, ctx } = input;
   const now = departAt;
-  const lt = localTime(departAt, timeZone);
+  const lt = localTime(departAt, timeZone, input.calendar);
   let elapsed = 0;
   let sigmaWeighted = 0;
   let confWeighted = 0;
@@ -261,6 +264,8 @@ export interface LearnInput {
   odKey?: string | null;
   /** Duração real ponta a ponta, só quando a viagem chegou ao destino da rota. */
   actualTotalS?: number | null;
+  /** Feriados do lugar da viagem. Sem ele, vale o padrão do fuso (`holidayCalendarFor`). */
+  calendar?: HolidayCalendar;
 }
 
 export interface Anomaly {
@@ -304,6 +309,7 @@ export function learnFromTrip(input: LearnInput): LearnResult {
     user: input.user,
     crowd: input.crowd,
     ctx: { rain: false, heavyRain: false, lowVisibility: false, alertsOnRoute: 0 },
+    calendar: input.calendar,
   });
 
   let learned = 0;
@@ -311,7 +317,7 @@ export function learnFromTrip(input: LearnInput): LearnResult {
     const seg = route.segments[o.index];
     if (!seg || seg.baseDurationS < MIN_LEARN_BASE_S || o.durationS <= 0) continue;
     const x = clampLog(Math.log(o.durationS / seg.baseDurationS));
-    const lt = localTime(o.enteredAt, timeZone);
+    const lt = localTime(o.enteredAt, timeZone, input.calendar);
     const now = o.enteredAt;
     const weight = Math.min(1, seg.baseDurationS / 20);
     for (const [get, put, t] of [

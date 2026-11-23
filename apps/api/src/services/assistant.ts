@@ -24,6 +24,7 @@ import { parseIntent } from '../ai/planner';
 import { config } from '../config';
 import { db, deletionTicket, getPlaces, getPrefs, getRoutineRoutes, getRoutines, saveRoutineRoutes, statsByPrefix } from '../db';
 import { currentWeather, geocode, STOP_QUERY, type BBox } from '../providers/geo-services';
+import { regionAt, regionalCalendar } from '../holidays';
 import { valhalla } from '../providers/routing';
 import { evaluatePlan, knownPlace, plan } from './planning';
 
@@ -169,7 +170,8 @@ async function routinePlan(
   ) {
     // Ids novos: cada plano tem as próprias rotas, como no caminho que chama o roteador.
     const routes = saved.routes.map((r) => ({ ...r, id: randomUUID() }));
-    return evaluatePlan(userId, req, routes, await currentWeather(req.origin.lat, req.origin.lon), null, ticket);
+    const [weather, region] = await Promise.all([currentWeather(req.origin.lat, req.origin.lon), regionAt(req.origin, req.timeZone)]);
+    return evaluatePlan(userId, req, routes, weather, null, ticket, region);
   }
   const running = plan(userId, req, null, ticket)
     .then((result) => {
@@ -187,7 +189,7 @@ export async function suggestions(userId: string, here: LatLon, timeZone: string
   const origin = matchPlace(places, here.lat, here.lon, 300);
   if (!origin) return [];
   const now = Date.now();
-  const lt = localTime(now, timeZone);
+  const lt = localTime(now, timeZone, regionalCalendar(timeZone, await regionAt(here, timeZone)));
   const preds = predictTrips(getRoutines(userId), origin.id, lt, now)
     .filter((p) => p.probability >= 0.25)
     .slice(0, 2);

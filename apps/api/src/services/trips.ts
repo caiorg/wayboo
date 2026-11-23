@@ -34,6 +34,7 @@ import {
   transaction,
   upsertPlace,
 } from '../db';
+import { regionalCalendar } from '../holidays';
 import { HttpError } from '../providers/http';
 
 type Row = Record<string, string | number | null>;
@@ -143,6 +144,9 @@ export function finishTrip(userId: string, tripId: string): FinishTripResponse {
   const shareCrowd = getShareCrowd(userId);
   const knownOrigin = matchPlace(places, first.lat, first.lon);
   const originPlace = placeFor(places, first.lat, first.lon);
+  // Feriados da região gravada no plano, a mesma que o ETA usou. Plano antigo ou apagado: calendário do fuso.
+  const firstPlan = legs[0] ? getPlan(userId, String(legs[0].plan_id)) : null;
+  const tripCalendar = regionalCalendar(timeZone, firstPlan?.holidayRegion);
 
   transaction(() => {
     legs.forEach((leg, i) => {
@@ -166,6 +170,7 @@ export function finishTrip(userId: string, tripId: string): FinishTripResponse {
         observations: trace.observations,
         departAt: trace.firstT ?? from,
         timeZone,
+        calendar: regionalCalendar(timeZone, plan.holidayRegion),
         user,
         crowd,
         ctx,
@@ -184,8 +189,8 @@ export function finishTrip(userId: string, tripId: string): FinishTripResponse {
     // Lugares e rotina: só para viagens reais (≥ 3 min e ≥ 500 m em linha reta).
     const straight = haversine([first.lon, first.lat], [last.lon, last.lat]);
     if (actualS >= 180 && straight >= 500) {
-      const departLt = localTime(first.t, timeZone);
-      const arriveLt = localTime(last.t, timeZone);
+      const departLt = localTime(first.t, timeZone, tripCalendar);
+      const arriveLt = localTime(last.t, timeZone, tripCalendar);
       const destPlace = placeFor(places, last.lat, last.lon);
       places = places.map((p) =>
         p.id === destPlace.id ? recordArrival(p, last.lat, last.lon, arriveLt) : p.id === originPlace.id ? recordDeparture(p, departLt) : p,

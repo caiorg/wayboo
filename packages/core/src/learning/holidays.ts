@@ -12,10 +12,16 @@ export interface Holiday {
 
 /**
  * Diz se a data local é feriado e devolve o nome, ou null.
- * Ponto de extensão para calendários estaduais e municipais: passe um calendário
- * próprio para `localTime` (ex.: combinando o nacional com o do município do usuário).
+ * Para feriados estaduais e municipais, passe um calendário próprio para `localTime`,
+ * `predictEta` e `learnFromTrip` (a API monta o da região em `apps/api/src/holidays.ts`).
  */
 export type HolidayCalendar = (date: LocalDate) => string | null;
+
+/** Estado (sigla) e município (código IBGE, ou null se não identificado) onde a viagem começa. */
+export interface HolidayRegion {
+  uf: string;
+  ibge: number | null;
+}
 
 /** Domingo de Páscoa no calendário gregoriano (algoritmo de Meeus/Jones/Butcher). */
 export function easterSunday(year: number): LocalDate {
@@ -105,8 +111,8 @@ const BRAZIL_TIME_ZONES = new Set(
     'America/Sao_Paulo',
     'Brazil/Acre',
     'Brazil/DeNoronha',
-  'Brazil/East',
-  'Brazil/West',
+    'Brazil/East',
+    'Brazil/West',
   ].map((tz) => tz.toLowerCase()),
 );
 
