@@ -128,8 +128,8 @@ Use `AI_BASE_URL=http://host.docker.internal:11434/v1`. O serviço `api` do `doc
 
 A variável `HOST_GATEWAY` do `.env` troca esse destino por um IP. Ela vale para qualquer instalação, com ou sem Ollama, porque o Docker recusa criar a API quando não consegue resolver `host-gateway`:
 
-- Daemon sem bridge padrão (`"bridge": "none"` no `daemon.json`) e sem `host-gateway-ip`: use um IP da máquina que o contêiner alcance, por exemplo o gateway da rede do Compose (`docker network inspect wayboo_default --format '{{(index .IPAM.Config 0).Gateway}}'`). Outra saída é definir `host-gateway-ip` no `daemon.json`.
-- Docker rootless com `slirp4netns`: `host-gateway` aponta para a bridge dentro do namespace do daemon, não para a máquina ([moby/moby#47684](https://github.com/moby/moby/issues/47684)). Use `HOST_GATEWAY=10.0.2.2`, o endereço da máquina no `slirp4netns`, e inicie o daemon com `DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false` para ele alcançar as portas da máquina. O `10.0.2.2` leva ao loopback da máquina, então o Ollama pode continuar em `127.0.0.1`.
+- Daemon sem bridge padrão (`"bridge": "none"` no `daemon.json`) e sem `host-gateway-ip`: defina `host-gateway-ip` no `daemon.json` com um IP da máquina, que não muda. Ou use em `HOST_GATEWAY` o gateway da rede do Compose (`docker network inspect wayboo_default --format '{{(index .IPAM.Config 0).Gateway}}'`). Esse gateway pode mudar quando a rede é recriada (por exemplo, após `docker compose down`). Nesse caso, confira o novo valor, atualize o `.env` e recrie a API.
+- Docker rootless com `slirp4netns`: `host-gateway` aponta para a bridge dentro do namespace do daemon, não para a máquina ([moby/moby#47684](https://github.com/moby/moby/issues/47684)). Use em `HOST_GATEWAY` o IP da máquina na rede local, com o Ollama escutando nesse IP ou em `0.0.0.0`. O `slirp4netns` abre a conexão a partir da própria máquina, então ela passa pelo `ufw` sem regra extra, e a regra abaixo não se aplica. Não desligue a proteção do loopback do rootless (`DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false`). Isso deixaria qualquer contêiner alcançar todos os serviços da máquina em `127.0.0.1`, não só o Ollama.
 
 Depois de mudar `HOST_GATEWAY`, rode `docker compose up -d api`.
 
@@ -138,10 +138,10 @@ Por padrão, o Ollama escuta só em `127.0.0.1:11434`, que o contêiner não alc
 ```sh
 net=$(docker network inspect wayboo_default --format '{{.Id}}')
 subnet=$(docker network inspect wayboo_default --format '{{(index .IPAM.Config 0).Subnet}}')
-sudo ufw allow in on "br-${net:0:12}" from "$subnet" to any port 11434 proto tcp
+sudo ufw allow in on "br-$(printf '%.12s' "$net")" from "$subnet" to any port 11434 proto tcp
 ```
 
-A interface `br-…` e a sub-rede mudam se a rede for recriada (por exemplo, após `docker compose down`). Nesse caso, apague a regra antiga com `sudo ufw delete` e crie de novo.
+A interface `br-…` e a sub-rede mudam se a rede for recriada (por exemplo, após `docker compose down`). Nesse caso, apague a regra antiga com `sudo ufw delete` e crie de novo. Se `HOST_GATEWAY` usa o gateway dessa rede, atualize-o também.
 
 ## HTTPS
 
