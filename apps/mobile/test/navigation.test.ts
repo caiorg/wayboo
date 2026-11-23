@@ -1,7 +1,12 @@
 import type { PlanResponse } from '@wayboo/core';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { startNavigation, stopNavigation, useNavSession } from '../src/lib/navigation';
+import * as Speech from 'expo-speech';
+import { pickVoice, startNavigation, stopNavigation, useNavSession, type VoiceInfo } from '../src/lib/navigation';
+import { useLocationStore } from '../src/lib/location';
+import { useSettings } from '../src/lib/store';
+
+const mocks = vi.hoisted(() => ({ announcement: null as string | null }));
 
 // Imita o expo-keep-awake da web: desativar uma tag inativa lança erro.
 const active = new Set<string>();
@@ -13,9 +18,15 @@ vi.mock('expo-keep-awake', () => ({
     if (!active.delete(tag)) throw new Error(`The wake lock with tag ${tag} has not activated yet`);
   }),
 }));
-vi.mock('expo-speech', () => ({ stop: vi.fn(), speak: vi.fn() }));
+vi.mock('expo-speech', () => ({
+  stop: vi.fn(),
+  speak: vi.fn(),
+  getAvailableVoicesAsync: vi.fn(async () => []),
+  VoiceQuality: { Default: 'Default', Enhanced: 'Enhanced' },
+}));
 vi.mock('@wayboo/core', () => ({
-  createNavigator: () => ({ update: () => ({ arrived: false, offRoute: false, announcement: null }) }),
+  INSTRUCTION_LANGUAGE: 'pt-BR',
+  createNavigator: () => ({ update: () => ({ arrived: false, offRoute: false, announcement: mocks.announcement }) }),
   simulateDrive: function* () {},
   markVisitedStops: (stops: unknown) => stops,
   rerouteRequest: () => ({}),
@@ -49,6 +60,9 @@ const settle = () => new Promise((r) => setTimeout(r, 0));
 beforeEach(() => {
   vi.clearAllMocks();
   active.clear();
+  mocks.announcement = null;
+  useSettings.setState({ voice: false });
+  useLocationStore.setState({ fix: null });
 });
 
 afterEach(async () => {
@@ -151,5 +165,101 @@ describe('wake lock da navegação', () => {
     expect(activate).toHaveBeenCalledTimes(5);
     expect(deactivate).toHaveBeenCalledTimes(5);
     expect(active.size).toBe(0);
+  });
+});
+
+const voice = (name: string, language: string, extra: Partial<VoiceInfo> = {}): VoiceInfo => ({
+  identifier: name,
+  name,
+  language,
+  quality: Speech.VoiceQuality.Default,
+  ...extra,
+});
+
+// Ordem real do Chrome no macOS com o sistema em en-US.
+const macVoices = [
+  voice('Samantha', 'en-US', { isDefault: true }),
+  voice('Eddy (Portuguese (Brazil))', 'pt-BR'),
+  voice('Grandpa (Portuguese (Brazil))', 'pt-BR'),
+  voice('Joana', 'pt-PT'),
+  voice('Luciana', 'pt-BR'),
+];
+
+describe('pickVoice', () => {
+  it('escolhe a voz natural do idioma, não a padrão do sistema nem as de efeito', () => {
+    expect(pickVoice(macVoices, 'pt-BR')?.name).toBe('Luciana');
+  });
+
+  it('serve para qualquer idioma', () => {
+    expect(pickVoice(macVoices, 'en-US')?.name).toBe('Samantha');
+    expect(pickVoice(macVoices, 'pt-PT')?.name).toBe('Joana');
+  });
+
+  it('cai para outra região do mesmo idioma', () => {
+    expect(pickVoice([voice('Samantha', 'en-US'), voice('Joana', 'pt-PT')], 'pt-BR')?.name).toBe('Joana');
+    expect(pickVoice(macVoices, 'pt-AO')?.name).toBe('Joana');
+  });
+
+  it('prefere uma voz de efeito do idioma a nenhuma', () => {
+    expect(pickVoice([voice('Eddy (Portuguese (Brazil))', 'pt-BR')], 'pt-BR')?.name).toBe('Eddy (Portuguese (Brazil))');
+  });
+
+  it('reconhece as vozes de efeito do iOS pelo identificador', () => {
+    const ios = [
+      voice('Eddy', 'pt-BR', { identifier: 'com.apple.eloquence.pt-BR.Eddy' }),
+      voice('Luciana', 'pt-BR', { identifier: 'com.apple.voice.compact.pt-BR.Luciana' }),
+    ];
+    expect(pickVoice(ios, 'pt-BR')?.name).toBe('Luciana');
+  });
+
+  it('prefere Enhanced, depois a padrão, depois a local', () => {
+    expect(pickVoice([voice('A', 'pt-BR'), voice('B', 'pt-BR', { quality: Speech.VoiceQuality.Enhanced })], 'pt-BR')?.name).toBe('B');
+    expect(pickVoice([voice('A', 'pt-BR'), voice('B', 'pt-BR', { isDefault: true })], 'pt-BR')?.name).toBe('B');
+    expect(pickVoice([voice('Google', 'pt-BR', { localService: false }), voice('Local', 'pt-BR', { localService: true })], 'pt-BR')?.name).toBe('Local');
+  });
+
+  it('aceita pt_BR e maiúsculas trocadas (Android)', () => {
+    expect(pickVoice([voice('pt-br-x-afs-local', 'pt_br')], 'pt-BR')?.name).toBe('pt-br-x-afs-local');
+  });
+
+  it('sem voz no idioma devolve null', () => {
+    expect(pickVoice(macVoices, 'ja-JP')).toBeNull();
+    expect(pickVoice([], 'pt-BR')).toBeNull();
+  });
+});
+
+describe('voz da navegação', () => {
+  const fix = { t: 1, lat: -23.5, lon: -46.6 };
+
+  it('fala com a voz escolhida para o idioma das instruções', async () => {
+    vi.mocked(Speech.getAvailableVoicesAsync).mockResolvedValueOnce(macVoices as Speech.Voice[]);
+    useSettings.setState({ voice: true });
+    useLocationStore.setState({ fix });
+    mocks.announcement = 'Vire à direita';
+    await startNavigation(plan, 0, false);
+    await settle();
+    expect(Speech.speak).toHaveBeenCalledWith('Vire à direita', { language: 'pt-BR', voice: 'Luciana', rate: 1.02 });
+  });
+
+  it('sem voz no idioma, fala só com o idioma', async () => {
+    useSettings.setState({ voice: true });
+    useLocationStore.setState({ fix });
+    mocks.announcement = 'Vire à direita';
+    await startNavigation(plan, 0, false);
+    await settle();
+    expect(Speech.speak).toHaveBeenCalledWith('Vire à direita', { language: 'pt-BR', voice: undefined, rate: 1.02 });
+  });
+
+  it('descarta a fala que ainda esperava a voz quando a navegação para', async () => {
+    let resolve!: (v: Speech.Voice[]) => void;
+    vi.mocked(Speech.getAvailableVoicesAsync).mockReturnValueOnce(new Promise((r) => (resolve = r)));
+    useSettings.setState({ voice: true });
+    useLocationStore.setState({ fix });
+    mocks.announcement = 'Vire à direita';
+    await startNavigation(plan, 0, false);
+    await stopNavigation();
+    resolve(macVoices as Speech.Voice[]);
+    await settle();
+    expect(Speech.speak).not.toHaveBeenCalled();
   });
 });

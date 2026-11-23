@@ -1,5 +1,6 @@
 import {
   createNavigator,
+  INSTRUCTION_LANGUAGE,
   markVisitedStops,
   rerouteRequest,
   simulateDrive,
@@ -90,11 +91,90 @@ function releaseKeepAwake() {
   });
 }
 
+/**
+ * Vozes de efeito e sintetizadores antigos da Apple. O Chrome e o Safari as listam antes das naturais
+ * (Eddy e Grandpa antes de Luciana em pt-BR).
+ */
+const NOVELTY_VOICES = new Set([
+  'Albert', 'Bad News', 'Bahh', 'Bells', 'Boing', 'Bubbles', 'Cellos', 'Eddy', 'Flo', 'Fred', 'Good News', 'Grandma',
+  'Grandpa', 'Jester', 'Junior', 'Kathy', 'Organ', 'Ralph', 'Reed', 'Rocko', 'Sandy', 'Shelley', 'Superstar',
+  'Trinoids', 'Whisper', 'Wobble', 'Zarvox',
+]);
+
+export type VoiceInfo = Pick<Speech.Voice, 'identifier' | 'name' | 'language' | 'quality'> &
+  Partial<Pick<Speech.WebVoice, 'isDefault' | 'localService'>>;
+
+const languageTag = (language: string) => language.replace(/_/g, '-').toLowerCase();
+
+function isNovelty(v: VoiceInfo): boolean {
+  // iOS: com.apple.eloquence.pt-BR.Eddy, com.apple.speech.synthesis.voice.Bubbles. Web: "Eddy (Portuguese (Brazil))".
+  return /eloquence|speech\.synthesis\.voice/i.test(v.identifier) || NOVELTY_VOICES.has(v.name.split(' (')[0]!);
+}
+
+/**
+ * Melhor voz para falar um texto em `language`, seja qual for o idioma do aparelho. Ordem: mesmo idioma e região
+ * (pt-BR), mesmo idioma de outra região (pt-PT), voz natural, qualidade Enhanced, voz padrão do sistema, voz local.
+ * Empate fica com a primeira da lista. Nenhuma voz no idioma: null, e a fala usa só `language`.
+ */
+export function pickVoice(voices: VoiceInfo[], language: string): VoiceInfo | null {
+  const want = languageTag(language);
+  const base = want.split('-')[0];
+  let best: VoiceInfo | null = null;
+  let bestScore = 0;
+  for (const v of voices) {
+    const tag = languageTag(v.language);
+    const lang = tag === want ? 2 : tag.split('-')[0] === base ? 1 : 0;
+    if (lang === 0) continue;
+    const score =
+      lang * 16 +
+      (isNovelty(v) ? 0 : 8) +
+      (v.quality === Speech.VoiceQuality.Enhanced ? 4 : 0) +
+      (v.isDefault ? 2 : 0) +
+      (v.localService === false ? 0 : 1);
+    if (score > bestScore) {
+      best = v;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+const VOICES_TIMEOUT_MS = 2000;
+const voiceByLanguage = new Map<string, Promise<string | null>>();
+
+/**
+ * Identificador da voz para `language`, resolvido uma vez por navegação. Na web, a lista de vozes pode demorar ou
+ * nunca chegar: depois de VOICES_TIMEOUT_MS, a fala segue só com `language`.
+ */
+function voiceFor(language: string): Promise<string | null> {
+  const cached = voiceByLanguage.get(language);
+  if (cached) return cached;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<Speech.Voice[]>((resolve) => {
+    timer = setTimeout(() => resolve([]), VOICES_TIMEOUT_MS);
+  });
+  const found = Promise.race([Speech.getAvailableVoicesAsync(), timeout])
+    .catch(() => [] as Speech.Voice[])
+    .then((voices) => {
+      clearTimeout(timer);
+      return pickVoice(voices, language)?.identifier ?? null;
+    });
+  voiceByLanguage.set(language, found);
+  return found;
+}
+
+/** Sobe a cada fala e no fim da navegação: uma fala que ainda espera a voz e ficou velha é descartada. */
+let speechGen = 0;
+
 function speak(text: string) {
   const { voice } = useSettings.getState();
   if (!voice || useNavSession.getState().muted) return;
-  Speech.stop();
-  Speech.speak(text, { language: 'pt-BR', rate: 1.02 });
+  const gen = ++speechGen;
+  void voiceFor(INSTRUCTION_LANGUAGE).then((id) => {
+    if (gen !== speechGen || useNavSession.getState().muted) return;
+    Speech.stop();
+    Speech.speak(text, { language: INSTRUCTION_LANGUAGE, voice: id ?? undefined, rate: 1.02 });
+  });
 }
 
 async function flush() {
@@ -118,6 +198,7 @@ function cleanup() {
   simTimer = null;
   flushTimer = null;
   navigator = null;
+  speechGen++;
   Speech.stop();
   releaseKeepAwake();
 }
@@ -161,6 +242,9 @@ export async function startNavigation(plan: PlanResponse, routeIndex: number, si
   buffer = [];
   const chosen = plan.routes[routeIndex];
   if (!chosen) return;
+  // Vozes podem ter sido instaladas desde a última navegação; já começa a buscar para a primeira fala.
+  voiceByLanguage.clear();
+  void voiceFor(INSTRUCTION_LANGUAGE);
   navigator = createNavigator(chosen.route, { segmentDurationsS: chosen.eta.segmentDurationsS });
   useNavSession.setState({
     status: 'navigating',

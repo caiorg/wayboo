@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   buildSegments,
   decodePolyline,
+  INSTRUCTION_LANGUAGE,
   instructionPtBR,
   type Coord,
   type LatLon,
@@ -103,7 +104,7 @@ export const valhalla: RoutingProvider = {
       },
       // O Valhalla só gera alternativas para rotas sem paradas intermediárias.
       alternates: locations.length === 2 ? alternatives : 0,
-      language: 'pt-BR',
+      language: INSTRUCTION_LANGUAGE,
       units: 'kilometers',
       directions_type: 'maneuvers',
     };
