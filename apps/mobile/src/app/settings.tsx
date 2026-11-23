@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ScrollView, StyleSheet, Switch, TextInput, View } from 'react-native';
 import { Button, Card, Chip, T } from '@/components/ui';
-import { api, ApiError, LocalSaveError, type DeviceInfo } from '@/lib/api';
+import { api, ApiError, LocalSaveError, RegistrationLimitError, type DeviceInfo } from '@/lib/api';
 import { exportMyData, type ExportResult } from '@/lib/exportData';
 import { normalizeApiUrl, useSettings, type ThemePref } from '@/lib/store';
 import { useTheme } from '@/lib/theme';
@@ -82,9 +82,9 @@ export default function SettingsScreen() {
     try {
       setShareCrowd((await api.privacy()).shareCrowd);
       setPrivacyError(null);
-    } catch {
+    } catch (e) {
       setShareCrowd(null);
-      setPrivacyError('Não foi possível ler a opção no servidor.');
+      setPrivacyError(e instanceof RegistrationLimitError ? e.message : 'Não foi possível ler a opção no servidor.');
     }
   };
 
@@ -94,9 +94,9 @@ export default function SettingsScreen() {
     try {
       setShareCrowd((await api.setPrivacy({ shareCrowd: v })).shareCrowd);
       setPrivacyError(null);
-    } catch {
+    } catch (e) {
       setShareCrowd(prev);
-      setPrivacyError('Não foi possível salvar. Confira a conexão com o servidor.');
+      setPrivacyError(e instanceof RegistrationLimitError ? e.message : 'Não foi possível salvar. Confira a conexão com o servidor.');
     }
   };
 

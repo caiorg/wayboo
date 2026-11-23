@@ -37,7 +37,7 @@ Com o opt-in de `PUT /privacy` ligado, a viagem soma ao usuário agregado (`user
 ## Direitos do titular (LGPD, art. 18)
 
 - `GET /me/export` devolve em JSON todas as linhas das tabelas acima ligadas ao usuário autenticado e os aparelhos (id, registro, último uso e revogação), sem o hash do token.
-- `DELETE /me` apaga todas essas linhas, inclusive o registro do aparelho, e o token deixa de valer. Alertas criados pelo usuário continuam visíveis para a comunidade até expirar, mas sem autor (`reporter = '*'`). A contagem de votos dos alertas de outras pessoas não muda.
+- `DELETE /me` apaga todas essas linhas, inclusive o registro do aparelho, e o token deixa de valer. Alertas criados pelo usuário continuam visíveis para a comunidade até expirar, mas sem autor (`reporter = '*'`). A contagem de votos dos alertas de outras pessoas não muda. O `user_id` apagado fica em `deleted_users`, só o id e sem data, para que `POST /auth/device` não o adote de novo como `legacyUserId`. Assim, um aparelho restaurado de backup recebe outro id. Esse registro não tem prazo, porque um backup do app pode voltar a qualquer momento. Ele também não entra em `GET /me/export`, porque não há mais token que dê acesso a esse id.
 - No app, Ajustes > Privacidade tem os botões para exportar e para apagar os dados. A exportação baixa o JSON na web e, no Android e no iOS, abre a folha de compartilhamento do sistema.
 
 ## Configuração

@@ -137,7 +137,9 @@ describe('dados do usuário', () => {
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[];
     const withUser = tables
       .map((t) => t.name)
-      .filter((name) => (db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get(name, 'user_id') as unknown) !== undefined);
+      .filter((name) => (db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get(name, 'user_id') as unknown) !== undefined)
+      // Só o id de quem apagou, para o registro não adotá-lo de novo; não é dado do usuário.
+      .filter((name) => name !== 'deleted_users');
     expect(withUser.length).toBeGreaterThan(0);
     const covered = Object.keys(exportUserData('ninguem').tables);
     for (const name of withUser) expect(covered, name).toContain(name);
@@ -158,6 +160,7 @@ describe('dados do usuário', () => {
     const res = await call<UserDataExport>(user, 'GET', '/me/export');
     expect(res.status).toBe(200);
     expect(res.headers['content-disposition']).toContain('attachment');
+    expect(res.headers['cache-control']).toBe('no-store');
     const { tables } = res.body;
     expect(res.body.userId).toBe(user.userId);
     expect(tables.trips!.map((t) => t.id)).toEqual([tripId]);
@@ -170,7 +173,7 @@ describe('dados do usuário', () => {
     expect(JSON.stringify(res.body)).not.toContain(other.userId);
   });
 
-  it('plano em andamento durante a exclusão não é gravado, mesmo se o aparelho voltar com o mesmo id', async () => {
+  it('plano em andamento durante a exclusão não é gravado, mesmo se o aparelho se registrar de novo', async () => {
     const user = await register();
     let release!: () => void;
     const entered = new Promise<void>((resolve) => {
@@ -181,16 +184,18 @@ describe('dados do usuário', () => {
 
     expect((await call(user, 'DELETE', '/me')).status).toBe(200);
     const again = await app.inject({ method: 'POST', url: '/auth/device', payload: { token: user.token, legacyUserId: user.userId } });
-    expect(again.json()).toEqual({ userId: user.userId });
+    const { userId: newId } = again.json<{ userId: string }>();
+    expect(newId).not.toBe(user.userId);
     hold = null;
     release();
 
     // 409, não 401: com 401 o app registraria o aparelho e repetiria o pedido, gravando o plano.
     expect((await pending).status).toBe(409);
     expect(count('SELECT COUNT(*) AS n FROM plans WHERE user_id = ?', user.userId)).toBe(0);
-    // Pedido novo, depois da exclusão, grava normalmente.
+    // Pedido novo, depois da exclusão, grava normalmente no id novo.
     expect((await call(user, 'POST', '/plan', api.planRequest)).status).toBe(200);
-    expect(count('SELECT COUNT(*) AS n FROM plans WHERE user_id = ?', user.userId)).toBe(1);
+    expect(count('SELECT COUNT(*) AS n FROM plans WHERE user_id = ?', user.userId)).toBe(0);
+    expect(count('SELECT COUNT(*) AS n FROM plans WHERE user_id = ?', newId)).toBe(1);
   });
 
   it('apagar remove tudo do usuário, invalida o token e não mexe nos dados de outro', async () => {

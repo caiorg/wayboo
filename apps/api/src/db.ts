@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS anomalies (
 );
 CREATE TABLE IF NOT EXISTS devices (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS devices_user ON devices(user_id);
+CREATE TABLE IF NOT EXISTS deleted_users (user_id TEXT PRIMARY KEY);
 `);
 
 // Bancos criados antes da retenção não têm a coluna; `CREATE TABLE IF NOT EXISTS` não a acrescenta.
@@ -265,15 +266,19 @@ const LAST_SEEN_STEP_MS = 3_600_000;
  * Idempotente: repetir o mesmo token devolve o mesmo usuário, então uma resposta perdida
  * não cria outra identidade. O aparelho grava o token antes de enviar.
  * `legacyUserId` é o UUID que o app enviava em `x-user-id`: o servidor adota esse id
- * (e os dados gravados nele) se nenhum aparelho o reivindicou antes. Senão, cria um usuário novo.
- * Aparelhos revogados continuam reivindicando o id. Devolve `null` para um token revogado, que nunca volta a valer.
+ * (e os dados gravados nele) se nenhum aparelho o reivindicou antes e ele não foi apagado (`DELETE /me`).
+ * Senão, cria um usuário novo. Aparelhos revogados continuam reivindicando o id.
+ * Devolve `null` para um token revogado, que nunca volta a valer.
  */
 export function registerDevice(token: string, legacyUserId?: string): { userId: string } | null {
   const hash = hashToken(token);
   return transaction(() => {
     const known = db.prepare('SELECT user_id, revoked_at FROM devices WHERE token_hash = ?').get(hash) as Row | undefined;
     if (known) return known.revoked_at === null ? { userId: String(known.user_id) } : null;
-    const claimed = legacyUserId !== undefined && db.prepare('SELECT 1 FROM devices WHERE user_id = ?').get(legacyUserId) !== undefined;
+    const claimed =
+      legacyUserId !== undefined &&
+      db.prepare('SELECT 1 FROM devices WHERE user_id = ? UNION ALL SELECT 1 FROM deleted_users WHERE user_id = ?').get(legacyUserId, legacyUserId) !==
+        undefined;
     const userId = legacyUserId !== undefined && !claimed ? legacyUserId : randomUUID();
     const now = Date.now();
     db.prepare('INSERT INTO devices (id, token_hash, user_id, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)').run(randomUUID(), hash, userId, now, now);
@@ -465,6 +470,7 @@ export function exportUserData(userId: string): UserDataExport {
 /**
  * Apaga todos os dados do usuário, inclusive os aparelhos: o token deixa de valer.
  * Alertas que ele criou continuam para a comunidade, sem autor; os votos dele saem, e a contagem do alerta fica.
+ * O id vai para `deleted_users` (só o id, sem data), e `registerDevice` não o adota de novo.
  */
 export function deleteUserData(userId: string): Record<string, number> {
   const now = Date.now();
@@ -476,6 +482,7 @@ export function deleteUserData(userId: string): Record<string, number> {
       const sql = t.table === 'alerts' ? `UPDATE alerts SET reporter = '${CROWD}' WHERE ${t.where}` : `DELETE FROM ${t.table} WHERE ${t.where}`;
       deleted[t.table] = Number(db.prepare(sql).run(userId).changes);
     }
+    db.prepare('INSERT OR IGNORE INTO deleted_users (user_id) VALUES (?)').run(userId);
     return deleted;
   });
 }

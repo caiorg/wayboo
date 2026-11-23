@@ -170,12 +170,13 @@ export interface PlanInternals {
   places: Place[];
 }
 
+/** `ticket` vem de `deletionTicket()` no início do pedido; o padrão serve quando `plan` é a primeira espera. */
 export async function plan(
   userId: string,
   req: z.output<typeof PlanRequestSchema>,
   priority: Priority = null,
+  ticket = deletionTicket(),
 ): Promise<PlanResponse> {
-  const ticket = deletionTicket();
   const [routes, weather] = await Promise.all([
     valhalla.route([req.origin, ...req.waypoints, req.destination], req.options, req.reroute ? 1 : 2),
     currentWeather(req.origin.lat, req.origin.lon),

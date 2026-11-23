@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   async: new Map<string, string>(),
@@ -57,10 +57,19 @@ function fakeServer() {
     }
     return new Response(status === 204 ? null : JSON.stringify(body), { status });
   };
+  /** Enquanto definido, `POST /auth/device` responde 429 com este `Retry-After`. */
+  let limited: string | null = null;
+  const limit = (retryAfter: string | null) => void (limited = retryAfter);
   const fetch = vi.fn(async (url: string, init: RequestInit) => {
     const path = new URL(url).pathname;
     const route = `${init.method} ${path}`;
     if (path === '/auth/device') {
+      if (limited !== null) {
+        return new Response(JSON.stringify({ error: 'Muitos registros deste endereço; tente mais tarde' }), {
+          status: 429,
+          headers: { 'retry-after': limited },
+        });
+      }
       const { token, legacyUserId } = JSON.parse(String(init.body)) as { token: string; legacyUserId?: string };
       if (revoked.has(token)) return json(route, 401, { error: 'Token revogado' });
       const known = devices.get(token);
@@ -89,7 +98,7 @@ function fakeServer() {
   });
   /** Segundo aparelho do mesmo usuário (a API ainda não tem rota para vincular). */
   const addDevice = (userId: string) => devices.set(crypto.randomUUID(), userId);
-  return { fetch, registered, calls, hold, revoked, addDevice };
+  return { fetch, registered, calls, hold, limit, revoked, addDevice };
 }
 
 beforeEach(() => {
@@ -314,5 +323,62 @@ describe('aparelhos', () => {
     expect((err as InstanceType<typeof ApiError>).status).toBe(409);
     expect(useSettings.getState().credentials[url]).toEqual(before);
     expect(useSettings.getState().userId).toBe(localId);
+  });
+});
+
+describe('registro limitado (429)', () => {
+  afterEach(() => vi.useRealTimers());
+
+  const registrations = (server: ReturnType<typeof fakeServer>) =>
+    server.fetch.mock.calls.filter(([url]) => new URL(url).pathname === '/auth/device').length;
+
+  it('só tenta registrar de novo depois do Retry-After e avisa com mensagem clara', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const server = fakeServer();
+    vi.stubGlobal('fetch', server.fetch);
+    const { api, RegistrationLimitError } = await import('../src/lib/api');
+
+    server.limit('120');
+    await expect(api.privacy()).rejects.toThrow('Muitos registros desta rede. Tente de novo em 2 min.');
+    expect(registrations(server)).toBe(1);
+
+    // O servidor já liberaria, mas o app respeita a espera e nem chama o registro.
+    server.limit(null);
+    vi.setSystemTime(Date.now() + 119_000);
+    const early = api.privacy();
+    await expect(early).rejects.toBeInstanceOf(RegistrationLimitError);
+    await expect(early).rejects.toThrow('Tente de novo em 1 s.');
+    expect(registrations(server)).toBe(1);
+
+    vi.setSystemTime(Date.now() + 1_000);
+    await expect(api.privacy()).resolves.toEqual({ shareCrowd: false });
+    expect(registrations(server)).toBe(2);
+  });
+
+  it('aceita Retry-After como data HTTP', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const server = fakeServer();
+    vi.stubGlobal('fetch', server.fetch);
+    const { api } = await import('../src/lib/api');
+
+    server.limit(new Date(Date.now() + 45_000).toUTCString());
+    await expect(api.privacy()).rejects.toThrow(/Tente de novo em 4[45] s\./);
+    server.limit(null);
+    vi.setSystemTime(Date.now() + 30_000);
+    await expect(api.privacy()).rejects.toThrow(/Muitos registros/);
+    expect(registrations(server)).toBe(1);
+  });
+
+  it('sem Retry-After válido, espera um minuto', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const server = fakeServer();
+    vi.stubGlobal('fetch', server.fetch);
+    const { api } = await import('../src/lib/api');
+
+    server.limit('abc');
+    await expect(api.privacy()).rejects.toThrow('Tente de novo em 1 min.');
+    server.limit(null);
+    vi.setSystemTime(Date.now() + 60_000);
+    await expect(api.privacy()).resolves.toEqual({ shareCrowd: false });
   });
 });

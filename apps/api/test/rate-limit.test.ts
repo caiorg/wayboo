@@ -1,5 +1,8 @@
 import { randomBytes } from 'node:crypto';
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+// A primeira importação do app (SDKs de IA, transformação do código) leva dezenas de segundos com a máquina carregada.
+// Na fase de import ela não tem prazo; depois, cada `appWith` só reavalia `src` e usa o código já transformado.
+import '../src/app';
 import type { buildApp } from '../src/app';
 import { ipKey } from '../src/rate-limit';
 import { client, makeRoute } from './helpers';
@@ -7,9 +10,6 @@ import { client, makeRoute } from './helpers';
 type App = Awaited<ReturnType<typeof buildApp>>;
 
 let app: App | undefined;
-
-// A primeira importação do app (SDKs de IA, Fastify) passa dos 5 s do teste numa máquina fria; as seguintes usam o cache.
-beforeAll(() => import('../src/app'), 30_000);
 
 afterEach(async () => {
   await app?.close();
@@ -46,10 +46,12 @@ describe('limite de registro em POST /auth/device', () => {
     const api = client(() => a, makeRoute());
     for (let i = 0; i < 3; i++) expect((await api.register()).userId).toBeTruthy();
 
-    const blocked = await post(a);
+    const blocked = await post(a, undefined, { origin: 'http://localhost:8081' });
     expect(blocked.statusCode).toBe(429);
     expect(Number(blocked.headers['retry-after'])).toBeGreaterThan(0);
     expect(Number(blocked.headers['retry-after'])).toBeLessThanOrEqual(600);
+    // Sem expor, o navegador esconde o cabeçalho do app web em outra origem.
+    expect(String(blocked.headers['access-control-expose-headers']).toLowerCase()).toContain('retry-after');
 
     vi.advanceTimersByTime(10 * 60_000);
     expect((await post(a)).statusCode).toBe(200);

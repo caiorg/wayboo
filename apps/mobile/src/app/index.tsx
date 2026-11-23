@@ -1,7 +1,7 @@
 import type { Brief, LatLon, PlanResponse, RoadAlert, StopSuggestion, Suggestion } from '@wayboo/core';
 import { useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
+import { AccessibilityInfo, Platform, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MapView } from '@/components/map/MapView';
 import type { CameraCommand, MapData } from '@/components/map/mapData';
@@ -10,7 +10,8 @@ import { ArrivalCard, ReportSheet, SuggestionCard } from '@/components/Panels';
 import { RouteSheet } from '@/components/RouteSheet';
 import { SearchPanel } from '@/components/SearchPanel';
 import { Card, IconButton, T } from '@/components/ui';
-import { api, type GeocodeResult } from '@/lib/api';
+import { api, RegistrationLimitError, type GeocodeResult } from '@/lib/api';
+import { checkReportAccuracy } from '@/lib/gpsAccuracy';
 import { startLocation, useLocationStore } from '@/lib/location';
 import { dismissSession, startNavigation, stopNavigation, toggleMute, useNavSession } from '@/lib/navigation';
 import { useSettings } from '@/lib/store';
@@ -52,8 +53,21 @@ export default function MapScreen() {
   const command = useCallback((c: CameraCommand) => setCamera({ ...c, nonce: ++nonce.current }), []);
   const notify = useCallback((text: string) => {
     setToast(text);
+    // iOS e Android não anunciam o toast sozinhos; na web, o `role="alert"` dele já anuncia.
+    if (Platform.OS !== 'web') AccessibilityInfo.announceForAccessibility(text);
     setTimeout(() => setToast((cur) => (cur === text ? null : cur)), 4500);
   }, []);
+  // Sugestões e alertas falham em silêncio, mas costumam ser as chamadas que registram o aparelho.
+  // O 429 do registro aparece uma vez por bloqueio, não a cada recarga dos alertas.
+  const shownLimit = useRef(0);
+  const backgroundError = useCallback(
+    (e: unknown) => {
+      if (!(e instanceof RegistrationLimitError) || e.retryAt === shownLimit.current) return;
+      shownLimit.current = e.retryAt;
+      notify(e.message);
+    },
+    [notify],
+  );
 
   const here: LatLon | null = fix ? { lat: fix.lat, lon: fix.lon } : null;
   const hereKey = here ? `${here.lat.toFixed(3)},${here.lon.toFixed(3)}` : null;
@@ -81,8 +95,11 @@ export default function MapScreen() {
     api
       .suggestions({ lat, lon })
       .then((r) => setSuggestions(r.suggestions))
-      .catch(() => setSuggestions([]));
-  }, [hereKey, plan, session.status]);
+      .catch((e) => {
+        setSuggestions([]);
+        backgroundError(e);
+      });
+  }, [hereKey, plan, session.status, backgroundError]);
 
   // Alertas da comunidade ao redor, atualizados a cada minuto.
   useEffect(() => {
@@ -92,11 +109,11 @@ export default function MapScreen() {
       api
         .alerts({ minLat: lat - 0.06, minLon: lon - 0.06, maxLat: lat + 0.06, maxLon: lon + 0.06 })
         .then((r) => setNearbyAlerts(r.alerts))
-        .catch(() => undefined);
+        .catch(backgroundError);
     void load();
     const id = setInterval(load, 60_000);
     return () => clearInterval(id);
-  }, [hereKey]);
+  }, [hereKey, backgroundError]);
 
   const fitPlan = useCallback(
     (p: PlanResponse) => {
@@ -198,10 +215,15 @@ export default function MapScreen() {
     void startNavigation(plan, selected, simulate);
   };
 
+  // Com a simulação ativa, o ponto do reporte (`session.nav`) não vem do GPS e a precisão não conta.
+  // `simulated` sozinho não basta: continua true depois de dispensar a sessão, quando o ponto volta a ser `here`.
+  const reportAccuracy = checkReportAccuracy(session.nav && session.simulated ? null : fix?.accuracy);
+
   const report = async (type: RoadAlert['type']) => {
     setReporting(false);
     const p = session.nav ? { lat: session.nav.snapped[1], lon: session.nav.snapped[0] } : here;
     if (!p) return notify('Sem localização para reportar.');
+    if (!reportAccuracy.ok) return notify(reportAccuracy.message);
     try {
       const a = await api.report(type, p);
       setNearbyAlerts((cur) => [a, ...cur.filter((x) => x.id !== a.id)]);
@@ -241,9 +263,9 @@ export default function MapScreen() {
       slowSpots: plan?.routes[selected]?.slowSpots ?? [],
       destination: plan?.destination ?? null,
       stops,
-      puck: here ? { ...here, heading: fix?.heading ?? null } : null,
+      puck: here ? { ...here, heading: fix?.heading ?? null, accuracy: fix?.accuracy ?? null } : null,
     };
-  }, [navigating, session.route, session.plan, session.stops, session.nav, plan, selected, stops, nearbyAlerts, here?.lat, here?.lon]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [navigating, session.route, session.plan, session.stops, session.nav, plan, selected, stops, nearbyAlerts, here?.lat, here?.lon, fix?.accuracy]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const panelStyle = wide ? [styles.sidePanel, { top: insets.top + 84 }] : [styles.bottomPanel, { paddingBottom: insets.bottom + 10 }];
 
@@ -268,7 +290,7 @@ export default function MapScreen() {
           ) : null}
           {reporting ? (
             <View style={panelStyle}>
-              <ReportSheet onReport={report} onClose={() => setReporting(false)} />
+              <ReportSheet accuracy={reportAccuracy} onReport={report} onClose={() => setReporting(false)} />
             </View>
           ) : (
             <NavBottomBar
@@ -307,7 +329,7 @@ export default function MapScreen() {
                 }}
               />
             ) : reporting ? (
-              <ReportSheet onReport={report} onClose={() => setReporting(false)} />
+              <ReportSheet accuracy={reportAccuracy} onReport={report} onClose={() => setReporting(false)} />
             ) : plan ? (
               <RouteSheet
                 plan={plan}
@@ -342,7 +364,7 @@ export default function MapScreen() {
       )}
 
       {toast ? (
-        <View style={[styles.toast, { top: insets.top + (navigating ? 150 : 80) }]} pointerEvents="none">
+        <View role="alert" style={[styles.toast, { top: insets.top + (navigating ? 150 : 80) }]} pointerEvents="none">
           <Card style={{ paddingVertical: 10 }}>
             <T variant="caption" color={t.text}>
               {toast}

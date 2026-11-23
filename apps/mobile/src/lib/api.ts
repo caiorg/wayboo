@@ -26,9 +26,31 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    /** Valor cru do cabeçalho `Retry-After` de uma resposta 429. */
+    public retryAfter: string | null = null,
   ) {
     super(message);
   }
+}
+
+/** `POST /auth/device` respondeu 429: o app não registra de novo neste servidor antes de `retryAt`. */
+export class RegistrationLimitError extends ApiError {
+  constructor(public retryAt: number) {
+    const s = Math.max(1, Math.ceil((retryAt - Date.now()) / 1000));
+    super(429, `Muitos registros desta rede. Tente de novo em ${s < 60 ? `${s} s` : `${Math.ceil(s / 60)} min`}.`);
+  }
+}
+
+/** Espera padrão quando o 429 vem sem `Retry-After` legível. */
+const DEFAULT_RETRY_AFTER_MS = 60_000;
+
+/** `Retry-After` em segundos ou como data HTTP (RFC 9110), convertido em instante absoluto. */
+function retryAt(header: string | null): number {
+  const now = Date.now();
+  const v = header?.trim() ?? '';
+  if (/^\d+$/.test(v)) return now + Number(v) * 1000;
+  const date = Date.parse(v);
+  return Number.isNaN(date) ? now + DEFAULT_RETRY_AFTER_MS : Math.max(now, date);
 }
 
 /** O servidor já apagou os dados, mas o aparelho não salvou a identidade nova. Não repetir o `DELETE /me`. */
@@ -61,7 +83,10 @@ async function send<T>(baseUrl: string, method: Method, path: string, body: unkn
   } finally {
     clearTimeout(timer);
   }
-  if (!res.ok) throw new ApiError(res.status, data.error ?? `Erro ${res.status}`);
+  if (!res.ok) {
+    const retryAfter = res.status === 429 ? (res.headers?.get('retry-after') ?? null) : null;
+    throw new ApiError(res.status, data.error ?? `Erro ${res.status}`, retryAfter);
+  }
   return data as T;
 }
 
@@ -99,6 +124,9 @@ const deviceRevoked = () =>
  */
 const registering = new Map<string, { userId: string; token: Promise<string> }>();
 
+/** Instante a partir do qual o servidor aceita um novo registro, depois de um 429. Vale por servidor. */
+const registerBlockedUntil = new Map<string, number>();
+
 /**
  * Token deste aparelho para `baseUrl`. Sem registro confirmado, grava um token novo (ou reusa o
  * gravado) e o registra. O registro é idempotente, então repetir após uma resposta perdida
@@ -114,6 +142,9 @@ async function deviceToken(baseUrl: string): Promise<string> {
   const localId = useSettings.getState().userId;
   const pending = registering.get(baseUrl);
   if (pending?.userId === localId) return pending.token;
+  const blockedUntil = registerBlockedUntil.get(baseUrl);
+  if (blockedUntil !== undefined && Date.now() < blockedUntil) throw new RegistrationLimitError(blockedUntil);
+  registerBlockedUntil.delete(baseUrl);
   const token = saved?.token ?? newToken();
   if (!saved) useSettings.getState().setCredential(baseUrl, { token });
   const register = (t: string, legacyUserId: string) =>
@@ -137,6 +168,12 @@ async function deviceToken(baseUrl: string): Promise<string> {
         if (useSettings.getState().userId !== localId) throw identityReset();
         useSettings.getState().setCredential(baseUrl, { token, userId });
         return token;
+      })
+      .catch((e: unknown) => {
+        if (!(e instanceof ApiError) || e.status !== 429) throw e;
+        const until = retryAt(e.retryAfter);
+        registerBlockedUntil.set(baseUrl, until);
+        throw new RegistrationLimitError(until);
       })
       .finally(() => {
         if (registering.get(baseUrl) === entry) registering.delete(baseUrl);

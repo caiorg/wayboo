@@ -102,7 +102,12 @@ export async function buildApp(opts: { logger?: boolean } = {}) {
     trustProxy: config.trustProxy,
   });
   // O padrão do plugin só libera GET, HEAD e POST; o app web também usa PUT, PATCH e DELETE.
-  await app.register(cors, { origin: config.corsOrigin, methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'] });
+  // `Retry-After` não é cabeçalho liberado pelo CORS: sem expor, o app web não lê a espera do 429.
+  await app.register(cors, {
+    origin: config.corsOrigin,
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
+    exposedHeaders: ['Retry-After'],
+  });
 
   app.setErrorHandler((err, req, reply) => {
     if (err instanceof ZodError) return reply.status(400).send({ error: 'Requisição inválida', issues: err.issues });
@@ -215,7 +220,10 @@ export async function buildApp(opts: { logger?: boolean } = {}) {
   // Portabilidade e eliminação (LGPD art. 18). O que é guardado está em docs/privacidade.md.
   app.get('/me/export', async (req, reply) => {
     const data = exportUserData(userOf(req));
-    return reply.header('content-disposition', 'attachment; filename="wayboo-dados.json"').send(data);
+    return reply
+      .header('content-disposition', 'attachment; filename="wayboo-dados.json"')
+      .header('cache-control', 'no-store')
+      .send(data);
   });
 
   app.delete('/me', async (req) => ({ deleted: deleteUserData(userOf(req)) }));

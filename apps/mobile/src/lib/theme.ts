@@ -107,6 +107,7 @@ export const ALERT_ICONS: Record<string, string> = {
   pothole: 'road-variant',
   police: 'police-badge',
   speed_camera: 'camera',
-  road_closed: 'road-variant',
+  // Placa de sentido proibido; `road-variant` já é o buraco.
+  road_closed: 'minus-circle',
   flood: 'waves',
 };
