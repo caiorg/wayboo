@@ -79,6 +79,21 @@ if (!db.prepare("SELECT 1 FROM pragma_table_info('trips') WHERE name = 'last_sam
   db.exec('ALTER TABLE trips ADD COLUMN last_sample_at INTEGER');
 }
 
+/**
+ * Acrescenta a `devices` o id público (o que `GET /devices` mostra, nunca o hash), o último uso e a revogação.
+ * Idempotente. Bancos antigos e novos passam por aqui, então o `CREATE TABLE` acima fica com as colunas originais.
+ */
+export function migrateDevices(database: DatabaseSync): void {
+  const has = (column: string) => database.prepare("SELECT 1 FROM pragma_table_info('devices') WHERE name = ?").get(column) !== undefined;
+  for (const [column, type] of [['id', 'TEXT'], ['last_seen_at', 'INTEGER'], ['revoked_at', 'INTEGER']] as const) {
+    if (!has(column)) database.exec(`ALTER TABLE devices ADD COLUMN ${column} ${type}`);
+  }
+  const fill = database.prepare('UPDATE devices SET id = ? WHERE token_hash = ?');
+  for (const r of database.prepare('SELECT token_hash FROM devices WHERE id IS NULL').all() as Row[]) fill.run(randomUUID(), String(r.token_hash));
+  database.exec('CREATE UNIQUE INDEX IF NOT EXISTS devices_id ON devices(id)');
+}
+migrateDevices(db);
+
 type Row = Record<string, string | number | null>;
 
 export function transaction<T>(fn: () => T): T {
@@ -242,28 +257,69 @@ export function savePrefs(userId: string, weights: PreferenceWeights, updates: n
 
 const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
 
+/** `last_seen_at` só é regravado depois desse intervalo, para não escrever no banco a cada pedido. */
+const LAST_SEEN_STEP_MS = 3_600_000;
+
 /**
  * Registra o token que o próprio aparelho gerou (256 bits); o banco guarda só o hash.
  * Idempotente: repetir o mesmo token devolve o mesmo usuário, então uma resposta perdida
  * não cria outra identidade. O aparelho grava o token antes de enviar.
  * `legacyUserId` é o UUID que o app enviava em `x-user-id`: o servidor adota esse id
  * (e os dados gravados nele) se nenhum aparelho o reivindicou antes. Senão, cria um usuário novo.
+ * Aparelhos revogados continuam reivindicando o id. Devolve `null` para um token revogado, que nunca volta a valer.
  */
-export function registerDevice(token: string, legacyUserId?: string): { userId: string } {
+export function registerDevice(token: string, legacyUserId?: string): { userId: string } | null {
   const hash = hashToken(token);
   return transaction(() => {
-    const known = db.prepare('SELECT user_id FROM devices WHERE token_hash = ?').get(hash) as Row | undefined;
-    if (known) return { userId: String(known.user_id) };
+    const known = db.prepare('SELECT user_id, revoked_at FROM devices WHERE token_hash = ?').get(hash) as Row | undefined;
+    if (known) return known.revoked_at === null ? { userId: String(known.user_id) } : null;
     const claimed = legacyUserId !== undefined && db.prepare('SELECT 1 FROM devices WHERE user_id = ?').get(legacyUserId) !== undefined;
     const userId = legacyUserId !== undefined && !claimed ? legacyUserId : randomUUID();
-    db.prepare('INSERT INTO devices (token_hash, user_id, created_at) VALUES (?, ?, ?)').run(hash, userId, Date.now());
+    const now = Date.now();
+    db.prepare('INSERT INTO devices (id, token_hash, user_id, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)').run(randomUUID(), hash, userId, now, now);
     return { userId };
   });
 }
 
-export function userOfToken(token: string): string | null {
-  const r = db.prepare('SELECT user_id FROM devices WHERE token_hash = ?').get(hashToken(token)) as Row | undefined;
-  return r ? String(r.user_id) : null;
+/** Usuário e aparelho do token, se ele não foi revogado. Também marca o último uso (no máximo 1 vez por hora). */
+export function deviceOfToken(token: string, now = Date.now()): { userId: string; deviceId: string } | null {
+  const r = db.prepare('SELECT id, user_id, last_seen_at FROM devices WHERE token_hash = ? AND revoked_at IS NULL').get(hashToken(token)) as
+    | Row
+    | undefined;
+  if (!r) return null;
+  if (r.last_seen_at === null || Number(r.last_seen_at) < now - LAST_SEEN_STEP_MS) {
+    db.prepare('UPDATE devices SET last_seen_at = ? WHERE id = ?').run(now, String(r.id));
+  }
+  return { userId: String(r.user_id), deviceId: String(r.id) };
+}
+
+export interface DeviceRecord {
+  id: string;
+  createdAt: string;
+  /** `null` em aparelhos registrados antes de o servidor guardar o último uso. */
+  lastSeenAt: string | null;
+}
+
+const iso = (ms: string | number | null | undefined) => (ms === null || ms === undefined ? null : new Date(Number(ms)).toISOString());
+
+/** Aparelhos ativos do usuário, do mais antigo ao mais novo. */
+export function listDevices(userId: string): DeviceRecord[] {
+  const rows = db.prepare('SELECT id, created_at, last_seen_at FROM devices WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at, id').all(userId) as Row[];
+  return rows.map((r) => ({ id: String(r.id), createdAt: iso(r.created_at)!, lastSeenAt: iso(r.last_seen_at) }));
+}
+
+/**
+ * Revoga um aparelho ativo do usuário. O último aparelho ativo não sai (`'last'`): sem login, ninguém
+ * mais conseguiria exportar nem apagar os dados. Para sair dele, o caminho é `DELETE /me`.
+ */
+export function revokeDevice(userId: string, deviceId: string, now = Date.now()): 'revoked' | 'not_found' | 'last' {
+  return transaction(() => {
+    const active = db.prepare('SELECT id FROM devices WHERE user_id = ? AND revoked_at IS NULL').all(userId) as Row[];
+    if (!active.some((r) => r.id === deviceId)) return 'not_found';
+    if (active.length === 1) return 'last';
+    db.prepare('UPDATE devices SET revoked_at = ? WHERE id = ?').run(now, deviceId);
+    return 'revoked';
+  });
 }
 
 // ---------- privacidade ----------
@@ -391,7 +447,7 @@ const USER_TABLES: { table: string; where: string; columns?: string }[] = [
   { table: 'privacy', where: 'user_id = ?' },
   { table: 'alerts', where: 'reporter = ?' },
   { table: 'alert_votes', where: 'user_id = ?' },
-  { table: 'devices', where: 'user_id = ?', columns: 'created_at' },
+  { table: 'devices', where: 'user_id = ?', columns: 'id, created_at, last_seen_at, revoked_at' },
 ];
 
 export interface UserDataExport {

@@ -166,7 +166,7 @@ describe('dados do usuário', () => {
     expect(tables.stats!.length).toBeGreaterThan(0);
     expect(tables.places!.length).toBeGreaterThan(0);
     expect(tables.privacy).toEqual([expect.objectContaining({ share_crowd: 1 })]);
-    expect(tables.devices).toEqual([{ created_at: expect.any(Number) }]);
+    expect(tables.devices).toEqual([{ id: expect.any(String), created_at: expect.any(Number), last_seen_at: expect.any(Number), revoked_at: null }]);
     expect(JSON.stringify(res.body)).not.toContain(other.userId);
   });
 
