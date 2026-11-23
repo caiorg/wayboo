@@ -21,10 +21,20 @@ function defaultApiUrl(): string {
 /** Chave usada antes da renomeação para Wayboo. É lida uma vez para manter o `userId` e as preferências. */
 const LEGACY_SETTINGS_KEY = 'trajeto-settings';
 
-/** Lê a chave nova; sem valor nela, move o da chave antiga para ela. */
+/**
+ * Lê a chave nova; sem valor nela, move o da chave antiga para ela. Com valor, apaga a antiga,
+ * que sobra se o app parou entre gravar a nova e apagar a antiga.
+ */
 async function readSettings(name: string): Promise<string | null> {
   const value = await AsyncStorage.getItem(name);
-  if (value !== null) return value;
+  if (value !== null) {
+    try {
+      await AsyncStorage.removeItem(LEGACY_SETTINGS_KEY);
+    } catch {
+      // Só preferências antigas, sem token: a próxima abertura tenta de novo.
+    }
+    return value;
+  }
   const legacy = await AsyncStorage.getItem(LEGACY_SETTINGS_KEY);
   if (legacy !== null) {
     await AsyncStorage.setItem(name, legacy);

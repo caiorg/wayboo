@@ -148,3 +148,27 @@ describe('token do aparelho', () => {
     expect(SecureStore.getItemAsync).not.toHaveBeenCalled();
   });
 });
+
+describe('chave antiga trajeto-settings', () => {
+  const saved = JSON.stringify({ state: { userId: 'local-1', credentials: {}, apiUrl: URL_A, voice: false }, version: 0 });
+
+  it('sem a chave nova, move o valor da antiga para ela', async () => {
+    h.async.set('trajeto-settings', saved);
+    const { useSettings } = await openApp();
+
+    expect(useSettings.getState().userId).toBe('local-1');
+    expect([...h.async.keys()]).toEqual(['wayboo-settings']);
+    expect(savedJson()).toBe(saved);
+  });
+
+  it('com as duas chaves, apaga a antiga e mantém a nova', async () => {
+    const legacy = JSON.stringify({ state: { userId: 'antigo', voice: true }, version: 0 });
+    h.async.set('wayboo-settings', saved);
+    h.async.set('trajeto-settings', legacy);
+    const { useSettings } = await openApp();
+
+    expect(useSettings.getState().userId).toBe('local-1');
+    expect([...h.async.keys()]).toEqual(['wayboo-settings']);
+    expect(savedJson()).toBe(saved);
+  });
+});
