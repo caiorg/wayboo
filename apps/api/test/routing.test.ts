@@ -1,7 +1,7 @@
 import type { Coord } from '@wayboo/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { config } from '../src/config';
-import { valhalla } from '../src/providers/routing';
+import { MAX_TRACES_IN_FLIGHT, valhalla } from '../src/providers/routing';
 import { encodePolyline } from './helpers';
 
 const shape: Coord[] = Array.from({ length: 11 }, (_, i): Coord => [-46.65 + i * 0.001, -23.56]);
@@ -176,6 +176,37 @@ describe('roteador Valhalla: limite de velocidade', () => {
     const [r] = await route();
     expect(r!.maneuvers).toHaveLength(3);
     expect(r!.speedLimits).toBeUndefined();
+  });
+
+  it('descarta os limites se o shape devolvido tiver os mesmos pontos em outra ordem', async () => {
+    traceHandler = () =>
+      json(traceOf(encodePolyline([...shape].reverse()), [{ speed_limit: 60, begin_shape_index: 0, end_shape_index: 10 }]));
+    const [r] = await route();
+    expect(r!.speedLimits).toBeUndefined();
+  });
+
+  it('com muitas consultas em voo, pula as excedentes em vez de enfileirar', async () => {
+    // 12 pontos a ~100 km um do outro: 11 pedaços, mais que o teto de consultas simultâneas.
+    const long: Coord[] = Array.from({ length: 12 }, (_, i): Coord => [-46.65, -23.56 + i * 0.9]);
+    routeResponse = {
+      trip: {
+        legs: [
+          {
+            shape: encodePolyline(long),
+            maneuvers: [
+              { type: 1, length: 1100, time: 40000, begin_shape_index: 0, end_shape_index: 11 },
+              { type: 4, length: 0, time: 0, begin_shape_index: 11, end_shape_index: 11 },
+            ],
+          },
+        ],
+        summary: { length: 1100, time: 40000 },
+      },
+    };
+    traceHandler = (b) => json(traceOf(String(b.encoded_polyline), [{ speed_limit: 110, begin_shape_index: 0, end_shape_index: 1 }]));
+    const [r] = await route();
+    expect(traces).toHaveLength(MAX_TRACES_IN_FLIGHT);
+    // Os pedaços consultados vêm primeiro; os pulados ficam sem limite.
+    expect(r!.speedLimits).toEqual([{ beginIdx: 0, endIdx: MAX_TRACES_IN_FLIGHT, kmh: 110 }]);
   });
 
   it('descarta os limites se o shape devolvido não bater com o da rota', async () => {

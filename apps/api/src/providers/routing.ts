@@ -62,6 +62,17 @@ interface ValhallaTraceAttributes {
 const TRACE_CHUNK_M = 150_000;
 const TRACE_CHUNK_POINTS = 10_000;
 
+/**
+ * Teto de consultas ao `/trace_attributes` em voo, somando todos os pedidos. Acima dele o pedaço fica
+ * sem limite em vez de esperar: o limite é opcional e não pode atrasar nem disputar o `/route`.
+ */
+export const MAX_TRACES_IN_FLIGHT = 8;
+let tracesInFlight = 0;
+
+/** Mesmos pontos, na mesma ordem, na precisão da polyline (1e-6). */
+const samePoints = (a: Coord[], b: Coord[]) =>
+  a.length === b.length && a.every((p, i) => Math.abs(p[0] - b[i]![0]) < 5e-7 && Math.abs(p[1] - b[i]![1]) < 5e-7);
+
 /** Pedaços `[início, fim]` (inclusive) do shape; pedaços vizinhos dividem o ponto de junção. */
 function traceChunks(shape: Coord[]): [number, number][] {
   const cum = cumulativeDistances(shape);
@@ -84,6 +95,8 @@ function traceChunks(shape: Coord[]): [number, number][] {
  * trecho fica sem limite em vez de mostrar um valor errado.
  */
 async function traceSpeedLimits(shape: Coord[]): Promise<SpeedLimitSpan[] | undefined> {
+  if (tracesInFlight >= MAX_TRACES_IN_FLIGHT) return undefined;
+  tracesInFlight++;
   try {
     const res = await fetchJson<ValhallaTraceAttributes>(`${config.valhallaUrl}/trace_attributes`, {
       method: 'POST',
@@ -98,10 +111,13 @@ async function traceSpeedLimits(shape: Coord[]): Promise<SpeedLimitSpan[] | unde
       // Curto: roda depois do `/route` e o app desiste do `/plan` em 25 s.
       timeoutMs: 4000,
     });
-    if (typeof res.shape !== 'string' || decodePolyline(res.shape, 6).length !== shape.length) return undefined;
+    // Os índices das arestas só valem se o shape devolvido for o enviado, ponto a ponto.
+    if (typeof res.shape !== 'string' || !samePoints(decodePolyline(res.shape, 6), shape)) return undefined;
     return parseValhallaSpeedLimits(res.edges, shape.length);
   } catch {
     return undefined;
+  } finally {
+    tracesInFlight--;
   }
 }
 
