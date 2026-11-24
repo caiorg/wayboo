@@ -34,7 +34,7 @@ import {
   type WeatherNow,
 } from '@wayboo/core';
 import type { z } from 'zod';
-import { alertsInBox, CROWD, deletionTicket, getPlaces, getPrefs, loadStats, savePlan } from '../db';
+import { alertsInBox, CROWD, getPlaces, getPrefs, loadStats, savePlan } from '../db';
 import { currentWeather, weatherFlags } from '../providers/geo-services';
 import { HttpError } from '../providers/http';
 import { valhalla } from '../providers/routing';
@@ -181,24 +181,17 @@ export interface PlanInternals {
   places: Place[];
 }
 
-/** `ticket` vem de `deletionTicket()` no início do pedido; o padrão serve quando `plan` é a primeira espera. */
-export async function plan(
-  userId: string,
-  req: z.output<typeof PlanRequestSchema>,
-  priority: Priority = null,
-  ticket = deletionTicket(),
-): Promise<PlanResponse> {
+export async function plan(userId: string, req: z.output<typeof PlanRequestSchema>, priority: Priority = null): Promise<PlanResponse> {
   const [routes, weather, region] = await Promise.all([
     valhalla.route([req.origin, ...req.waypoints, req.destination], req.options, req.reroute ? 1 : 2),
     currentWeather(req.origin.lat, req.origin.lon),
     regionAt(req.origin, req.timeZone),
   ]);
-  return evaluatePlan(userId, req, routes, weather, priority, ticket, region);
+  return evaluatePlan(userId, req, routes, weather, priority, region);
 }
 
 /**
  * Avalia rotas já obtidas com o que foi aprendido (separado para testes e simulação sem rede).
- * `ticket` vem de `deletionTicket()` no início do pedido, antes de esperar os provedores.
  * `region` (de `regionAt`) acrescenta os feriados estaduais e municipais; null usa só o calendário do fuso.
  */
 export function evaluatePlan(
@@ -207,7 +200,6 @@ export function evaluatePlan(
   routes: Route[],
   weather: WeatherNow | null,
   priority: Priority = null,
-  ticket = deletionTicket(),
   region: HolidayRegion | null = null,
 ): PlanResponse {
   const departAt = req.departAt ?? Date.now();
@@ -283,6 +275,6 @@ export function evaluatePlan(
     holidayRegion: region,
   };
   // Usuário apagado durante o planejamento. 409, não 401: com 401 o app registraria o aparelho e repetiria o pedido.
-  if (!savePlan(userId, result, ticket)) throw new HttpError(409, 'Dados do usuário apagados durante o planejamento');
+  if (!savePlan(userId, result)) throw new HttpError(409, 'Dados do usuário apagados durante o planejamento');
   return result;
 }

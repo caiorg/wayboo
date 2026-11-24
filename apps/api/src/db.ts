@@ -75,6 +75,9 @@ CREATE INDEX IF NOT EXISTS devices_user ON devices(user_id);
 CREATE TABLE IF NOT EXISTS deleted_users (user_id TEXT PRIMARY KEY);
 `);
 
+/** Condição de INSERT ... SELECT que grava só se o usuário (último parâmetro) não foi apagado por `DELETE /me`. */
+const NOT_DELETED = 'NOT EXISTS (SELECT 1 FROM deleted_users WHERE user_id = ?)';
+
 // Bancos criados antes da retenção não têm a coluna; `CREATE TABLE IF NOT EXISTS` não a acrescenta.
 if (!db.prepare("SELECT 1 FROM pragma_table_info('trips') WHERE name = 'last_sample_at'").get()) {
   db.exec('ALTER TABLE trips ADD COLUMN last_sample_at INTEGER');
@@ -231,12 +234,14 @@ export function getRoutineRoutes(userId: string, originId: string, destId: strin
   };
 }
 
+/** Como `savePlan`, não grava para usuário em `deleted_users`: a rota chega depois de esperar o roteador. */
 export function saveRoutineRoutes(userId: string, originId: string, destId: string, v: RoutineRoutes): void {
   db.prepare(
-    `INSERT INTO routine_routes (user_id, origin_id, dest_id, from_lat, from_lon, to_lat, to_lon, fetched_at, routes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO routine_routes (user_id, origin_id, dest_id, from_lat, from_lon, to_lat, to_lon, fetched_at, routes)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${NOT_DELETED}
      ON CONFLICT(user_id, origin_id, dest_id) DO UPDATE SET from_lat = excluded.from_lat, from_lon = excluded.from_lon,
        to_lat = excluded.to_lat, to_lon = excluded.to_lon, fetched_at = excluded.fetched_at, routes = excluded.routes`,
-  ).run(userId, originId, destId, v.from.lat, v.from.lon, v.to.lat, v.to.lon, v.fetchedAt, JSON.stringify(v.routes));
+  ).run(userId, originId, destId, v.from.lat, v.from.lon, v.to.lat, v.to.lon, v.fetchedAt, JSON.stringify(v.routes), userId);
 }
 
 // ---------- preferências ----------
@@ -345,25 +350,17 @@ export function setShareCrowd(userId: string, share: boolean): void {
 // ---------- planos ----------
 
 /**
- * Última exclusão de cada usuário, só em memória, com um contador em vez de relógio para não depender
- * da resolução de `Date.now()`. Basta durar mais que o pedido mais longo; não vai para o disco.
- */
-const deletions = new Map<string, { seq: number; at: number }>();
-const DELETION_MEMORY_MS = 10 * 60_000;
-let deletionSeq = 0;
-
-/** Marca o início de um pedido que grava depois de esperar; passe o valor para `savePlan`. */
-export const deletionTicket = () => deletionSeq;
-
-/**
- * Grava o plano, salvo se o usuário foi apagado (`DELETE /me`) depois de `ticket` (de `deletionTicket()`,
- * pego no início do pedido). O planejamento espera os provedores; sem essa checagem, um pedido em curso
- * recriaria origem, destino e rota depois da exclusão, mesmo que o aparelho se registre de novo com o mesmo id.
+ * Grava o plano, salvo se o usuário está em `deleted_users`. O planejamento espera os provedores (IA, clima,
+ * roteador); sem essa checagem, um pedido que começou antes do `DELETE /me` recriaria origem, destino e rota.
+ * Um id apagado nunca volta a um aparelho (`registerDevice`), então só pedidos assim chegam aqui com ele.
+ * A checagem fica no próprio INSERT, e vale com o servidor reiniciado ou com outro processo no mesmo banco.
  * Devolve se gravou.
  */
-export function savePlan(userId: string, plan: PlanResponse, ticket: number): boolean {
-  if ((deletions.get(userId)?.seq ?? 0) > ticket) return false;
-  db.prepare('INSERT INTO plans (id, user_id, created_at, body) VALUES (?, ?, ?, ?)').run(plan.planId, userId, plan.createdAt, JSON.stringify(plan));
+export function savePlan(userId: string, plan: PlanResponse): boolean {
+  const inserted = db
+    .prepare(`INSERT INTO plans (id, user_id, created_at, body) SELECT ?, ?, ?, ? WHERE ${NOT_DELETED}`)
+    .run(plan.planId, userId, plan.createdAt, JSON.stringify(plan), userId).changes;
+  if (!inserted) return false;
   // Planos só servem para iniciar viagens; os de mais de 2 dias sem viagem podem sair.
   db.prepare(
     'DELETE FROM plans WHERE created_at < ? AND id NOT IN (SELECT plan_id FROM trip_legs)',
@@ -473,9 +470,6 @@ export function exportUserData(userId: string): UserDataExport {
  * O id vai para `deleted_users` (só o id, sem data), e `registerDevice` não o adota de novo.
  */
 export function deleteUserData(userId: string): Record<string, number> {
-  const now = Date.now();
-  for (const [id, d] of deletions) if (d.at < now - DELETION_MEMORY_MS) deletions.delete(id);
-  deletions.set(userId, { seq: ++deletionSeq, at: now });
   return transaction(() => {
     const deleted: Record<string, number> = {};
     for (const t of USER_TABLES) {
