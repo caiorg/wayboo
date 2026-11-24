@@ -483,7 +483,11 @@ export function deleteUserData(userId: string): Record<string, number> {
 
 // ---------- alertas ----------
 
-export const toAlert = (r: Row): RoadAlert => ({
+/**
+ * Com `viewer`, inclui `mine` e `myVote` de quem pergunta. A linha precisa trazer `my_up`
+ * (voto do `viewer`, de `alert_votes`, ou `null`), como em `alertsInBox` e `alertById`.
+ */
+export const toAlert = (r: Row, viewer?: string): RoadAlert => ({
   id: String(r.id),
   type: String(r.type) as RoadAlert['type'],
   lat: Number(r.lat),
@@ -493,12 +497,24 @@ export const toAlert = (r: Row): RoadAlert => ({
   expiresAt: new Date(Number(r.expires_at)).toISOString(),
   upvotes: Number(r.up),
   downvotes: Number(r.down),
+  ...(viewer === undefined
+    ? {}
+    : { mine: r.reporter === viewer, myVote: r.my_up === null || r.my_up === undefined ? null : Number(r.my_up) ? 'up' : 'down' }),
 });
 
-export function alertsInBox(minLat: number, minLon: number, maxLat: number, maxLon: number, now = Date.now()): RoadAlert[] {
+// Sem `viewer`, o JOIN não casa com nenhuma linha e `my_up` vem `null`.
+const ALERT_WITH_VOTE = 'SELECT a.*, v.up AS my_up FROM alerts a LEFT JOIN alert_votes v ON v.alert_id = a.id AND v.user_id = ?';
+
+export function alertsInBox(minLat: number, minLon: number, maxLat: number, maxLon: number, now = Date.now(), viewer?: string): RoadAlert[] {
   return (
     db
-      .prepare('SELECT * FROM alerts WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ? AND expires_at > ? LIMIT 500')
-      .all(minLat, maxLat, minLon, maxLon, now) as Row[]
-  ).map(toAlert);
+      .prepare(`${ALERT_WITH_VOTE} WHERE a.lat BETWEEN ? AND ? AND a.lon BETWEEN ? AND ? AND a.expires_at > ? LIMIT 500`)
+      .all(viewer ?? null, minLat, maxLat, minLon, maxLon, now) as Row[]
+  ).map((r) => toAlert(r, viewer));
+}
+
+/** O alerta visto por `viewer`, ou `null` se não existe. Não filtra os expirados. */
+export function alertById(id: string, viewer: string): RoadAlert | null {
+  const r = db.prepare(`${ALERT_WITH_VOTE} WHERE a.id = ?`).get(viewer, id) as Row | undefined;
+  return r ? toAlert(r, viewer) : null;
 }

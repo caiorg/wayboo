@@ -21,6 +21,7 @@ import { briefPlan, narrateInsights } from './ai/planner';
 import { llm } from './ai/providers';
 import { config } from './config';
 import {
+  alertById,
   alertsInBox,
   db,
   deleteUserData,
@@ -34,7 +35,6 @@ import {
   registerDevice,
   revokeDevice,
   setShareCrowd,
-  toAlert,
   upsertPlace,
 } from './db';
 import { geocode, reverseGeocode } from './providers/geo-services';
@@ -78,23 +78,29 @@ const ALERT_TTL_MIN: Record<string, number> = {
   flood: 60 * 3,
 };
 
-function vote(userId: string, alertId: string, up: boolean) {
-  const a = db.prepare('SELECT * FROM alerts WHERE id = ?').get(alertId) as Record<string, string | number | null> | undefined;
+/**
+ * Registra o voto num alerta ainda válido. O voto é definitivo: `repeated` se o usuário já votou,
+ * `own` se ele reportou o alerta. Nos dois casos nada muda.
+ */
+function castVote(userId: string, alertId: string, up: boolean, now = Date.now()): 'ok' | 'own' | 'repeated' {
+  const a = db.prepare('SELECT type, reporter FROM alerts WHERE id = ? AND expires_at > ?').get(alertId, now) as
+    | { type: string; reporter: string }
+    | undefined;
+  // Expirado e ainda não purgado conta como inexistente: confirmar não traz o alerta de volta.
   if (!a) throw new HttpError(404, 'Alerta não encontrado');
-  const prev = db.prepare('SELECT up FROM alert_votes WHERE alert_id = ? AND user_id = ?').get(alertId, userId) as { up: number } | undefined;
-  if (!prev && a.reporter !== userId) {
-    db.prepare('INSERT INTO alert_votes (alert_id, user_id, up) VALUES (?, ?, ?)').run(alertId, userId, up ? 1 : 0);
-    const ttl = ALERT_TTL_MIN[String(a.type)]! * 60_000;
-    // Confirmação renova a validade; "não está mais lá" encurta. Três negativos a mais que positivos removem.
-    if (up) db.prepare('UPDATE alerts SET up = up + 1, expires_at = MAX(expires_at, ?) WHERE id = ?').run(Date.now() + ttl, alertId);
-    else
-      db.prepare('UPDATE alerts SET down = down + 1, expires_at = CASE WHEN down + 1 - up >= 3 THEN ? ELSE expires_at - ? END WHERE id = ?').run(
-        Date.now(),
-        Math.round(ttl / 3),
-        alertId,
-      );
-  }
-  return toAlert(db.prepare('SELECT * FROM alerts WHERE id = ?').get(alertId) as Record<string, string | number | null>);
+  if (a.reporter === userId) return 'own';
+  if (db.prepare('SELECT 1 FROM alert_votes WHERE alert_id = ? AND user_id = ?').get(alertId, userId)) return 'repeated';
+  db.prepare('INSERT INTO alert_votes (alert_id, user_id, up) VALUES (?, ?, ?)').run(alertId, userId, up ? 1 : 0);
+  const ttl = ALERT_TTL_MIN[a.type]! * 60_000;
+  // Confirmação renova a validade; "não está mais lá" encurta. Três negativos a mais que positivos removem.
+  if (up) db.prepare('UPDATE alerts SET up = up + 1, expires_at = MAX(expires_at, ?) WHERE id = ?').run(now + ttl, alertId);
+  else
+    db.prepare('UPDATE alerts SET down = down + 1, expires_at = CASE WHEN down + 1 - up >= 3 THEN ? ELSE expires_at - ? END WHERE id = ?').run(
+      now,
+      Math.round(ttl / 3),
+      alertId,
+    );
+  return 'ok';
 }
 
 /** Monta a API sem abrir porta, para o servidor e para os testes (`app.inject`). */
@@ -266,11 +272,14 @@ export async function buildApp(opts: { logger?: boolean; logStream?: Writable } 
 
   // ---------- alertas da comunidade ----------
 
-  app.get('/alerts', async (req) => {
+  // Sem token, a lista é pública. Com token, cada alerta traz `mine` e `myVote` de quem pergunta.
+  app.get('/alerts', async (req, reply) => {
     const q = z
       .object({ minLat: z.coerce.number(), minLon: z.coerce.number(), maxLat: z.coerce.number(), maxLon: z.coerce.number() })
       .parse(req.query);
-    return { alerts: alertsInBox(q.minLat, q.minLon, q.maxLat, q.maxLon) };
+    const viewer = req.headers.authorization === undefined ? undefined : userOf(req);
+    if (viewer) reply.header('cache-control', 'private, no-store');
+    return { alerts: alertsInBox(q.minLat, q.minLon, q.maxLat, q.maxLon, Date.now(), viewer) };
   });
 
   app.post('/alerts', async (req) => {
@@ -280,7 +289,11 @@ export async function buildApp(opts: { logger?: boolean; logStream?: Writable } 
     const near = db
       .prepare('SELECT * FROM alerts WHERE type = ? AND expires_at > ? AND ABS(lat - ?) < 0.0008 AND ABS(lon - ?) < 0.0008 LIMIT 1')
       .get(b.type, Date.now(), b.lat, b.lon) as Record<string, string | number | null> | undefined;
-    if (near) return vote(userId, String(near.id), true);
+    if (near) {
+      // Reportar de novo vira confirmação; se o voto não conta (autor ou repetido), devolve o alerta como está.
+      castVote(userId, String(near.id), true);
+      return alertById(String(near.id), userId);
+    }
     const now = Date.now();
     const id = randomUUID();
     db.prepare('INSERT INTO alerts (id, type, lat, lon, note, created_at, expires_at, reporter) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
@@ -293,12 +306,16 @@ export async function buildApp(opts: { logger?: boolean; logStream?: Writable } 
       now + ALERT_TTL_MIN[b.type]! * 60_000,
       userId,
     );
-    return toAlert(db.prepare('SELECT * FROM alerts WHERE id = ?').get(id) as Record<string, string | number | null>);
+    return alertById(id, userId);
   });
 
   app.post('/alerts/:id/vote', async (req) => {
+    const userId = userOf(req);
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
-    return vote(userOf(req), id, VoteSchema.parse(req.body).up);
+    const result = castVote(userId, id, VoteSchema.parse(req.body).up);
+    if (result === 'own') throw new HttpError(403, 'Você não pode votar no próprio alerta');
+    if (result === 'repeated') throw new HttpError(409, 'Você já votou neste alerta');
+    return alertById(id, userId);
   });
 
   // ---------- aprendizado ----------

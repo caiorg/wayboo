@@ -79,6 +79,10 @@ export interface RoadAlert {
   expiresAt: string;
   upvotes: number;
   downvotes: number;
+  /** Só em respostas autenticadas: quem pergunta reportou o alerta. */
+  mine?: boolean;
+  /** Só em respostas autenticadas: voto de quem pergunta. O voto é definitivo. */
+  myVote?: 'up' | 'down' | null;
 }
 
 export const TraceSampleSchema = z.object({
