@@ -1,8 +1,3 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod';
-import OpenAI from 'openai';
-import { zodResponseFormat } from 'openai/helpers/zod';
-import { parseChatCompletion } from 'openai/lib/parser';
 import { z } from 'zod';
 import { config } from '../config';
 
@@ -18,14 +13,31 @@ export interface LlmProvider {
 
 class AiError extends Error {}
 
+/**
+ * Memoiza `load`. Se falhar, a próxima chamada tenta de novo.
+ * Os SDKs só são importados na primeira chamada: sem IA configurada, o servidor e os testes não pagam o import.
+ */
+function lazy<T>(load: () => Promise<T>): () => Promise<T> {
+  let p: Promise<T> | undefined;
+  return () =>
+    (p ??= load().catch((e: unknown) => {
+      p = undefined;
+      throw e;
+    }));
+}
+
 function anthropicProvider(model: string): LlmProvider {
-  // Sem argumentos o SDK resolve ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN ou o perfil do `ant auth login`.
-  const client = new Anthropic({ timeout: config.ai.timeoutMs, maxRetries: 1 });
+  const client = lazy(async () => {
+    const [{ default: Sdk }, { betaZodOutputFormat }] = await Promise.all([import('@anthropic-ai/sdk'), import('@anthropic-ai/sdk/helpers/beta/zod')]);
+    // Sem argumentos o SDK resolve ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN ou o perfil do `ant auth login`.
+    return { sdk: new Sdk({ timeout: config.ai.timeoutMs, maxRetries: 1 }), betaZodOutputFormat };
+  });
   return {
     name: 'anthropic',
     model,
     async generateObject({ system, prompt, schema }) {
-      const res = await client.beta.messages.parse({
+      const { sdk, betaZodOutputFormat } = await client();
+      const res = await sdk.beta.messages.parse({
         model,
         max_tokens: 4000,
         system,
@@ -74,19 +86,28 @@ function bodyError(res: unknown): AiError | null {
 
 /** OpenAI e qualquer servidor compatível (Ollama, vLLM, LM Studio, OpenRouter) via `baseURL`. */
 function openAiCompatibleProvider(o: OpenAiCompatibleOptions): LlmProvider {
-  const client = new OpenAI({
-    apiKey: o.apiKey,
-    baseURL: o.baseURL,
-    defaultHeaders: o.defaultHeaders,
-    fetch: o.fetch,
-    timeout: config.ai.timeoutMs,
-    maxRetries: 1,
+  const client = lazy(async () => {
+    const [{ default: Sdk }, { zodResponseFormat }, { parseChatCompletion }] = await Promise.all([
+      import('openai'),
+      import('openai/helpers/zod'),
+      import('openai/lib/parser'),
+    ]);
+    const sdk = new Sdk({
+      apiKey: o.apiKey,
+      baseURL: o.baseURL,
+      defaultHeaders: o.defaultHeaders,
+      fetch: o.fetch,
+      timeout: config.ai.timeoutMs,
+      maxRetries: 1,
+    });
+    return { sdk, zodResponseFormat, parseChatCompletion };
   });
   return {
     name: o.name,
     model: o.model,
     async generateObject({ system, prompt, schema, schemaName }) {
       await o.preflight?.();
+      const { sdk, zodResponseFormat, parseChatCompletion } = await client();
       const body = {
         ...o.extraBody,
         model: o.model,
@@ -97,7 +118,7 @@ function openAiCompatibleProvider(o: OpenAiCompatibleOptions): LlmProvider {
         response_format: zodResponseFormat(schema, schemaName),
       };
       // `create` + `parseChatCompletion` em vez de `parse`: o erro no corpo precisa ser lido antes do parser do SDK.
-      const res = await client.chat.completions.create(body);
+      const res = await sdk.chat.completions.create(body);
       const err = bodyError(res);
       if (err) throw err;
       const msg = parseChatCompletion(res, body).choices[0]?.message;

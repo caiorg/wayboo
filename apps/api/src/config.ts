@@ -155,3 +155,5 @@ if ((provider === 'openai' || provider === 'ollama' || provider === 'openrouter'
   );
 }
 if (provider === 'openrouter' && !config.ai.apiKey) throw new Error('OPENROUTER_API_KEY é obrigatório para AI_PROVIDER=openrouter.');
+// O cliente da OpenAI lançaria o mesmo erro, mas só na primeira chamada, porque o SDK é carregado sob demanda.
+if (provider === 'openai' && !config.ai.apiKey) throw new Error('OPENAI_API_KEY é obrigatório para AI_PROVIDER=openai.');
