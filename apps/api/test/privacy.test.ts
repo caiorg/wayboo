@@ -87,21 +87,22 @@ describe('opt-in do aprendizado coletivo', () => {
 describe('cache-control', () => {
   it('as rotas com dado pessoal respondem no-store, inclusive no erro', async () => {
     const reg = await app.inject({ method: 'POST', url: '/auth/device', payload: { token: 'x'.repeat(43) } });
+    expect(reg.statusCode).toBe(200);
     expect(reg.headers['cache-control']).toBe('no-store');
 
     const user = await register();
-    const routes: [Parameters<typeof call>[1], string, object?][] = [
-      ['GET', '/privacy'],
-      ['PUT', '/privacy', { shareCrowd: false }],
-      ['GET', '/insights'],
-      ['GET', '/devices'],
-      ['POST', '/plan', api.planRequest],
-      ['GET', '/reverse'], // 400 na validação, sem chamar a rede
+    const routes: [Parameters<typeof call>[1], string, number, object?][] = [
+      ['GET', '/privacy', 200],
+      ['PUT', '/privacy', 200, { shareCrowd: false }],
+      ['GET', '/insights', 200],
+      ['GET', '/devices', 200],
+      ['POST', '/plan', 200, api.planRequest],
+      ['GET', '/reverse', 400], // falha na validação, sem chamar a rede
     ];
-    for (const [method, url, payload] of routes) {
+    for (const [method, url, status, payload] of routes) {
       const res = await call(user, method, url, payload);
+      expect(res.status, `${method} ${url}`).toBe(status);
       expect(res.headers['cache-control'], `${method} ${url}`).toBe('no-store');
-      if (url === '/reverse') expect(res.status).toBe(400);
     }
 
     const anon = await app.inject({ method: 'GET', url: '/insights' });
