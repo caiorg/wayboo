@@ -5,28 +5,7 @@ import type { buildApp } from '../src/app';
 export const TZ = 'America/Sao_Paulo';
 
 /** Polyline com precisão 6, o formato que o Valhalla devolve em `shape`. */
-export function encodePolyline(coords: Coord[]): string {
-  let out = '';
-  let prevLat = 0;
-  let prevLon = 0;
-  const enc = (v: number) => {
-    let n = v < 0 ? ~(v << 1) : v << 1;
-    while (n >= 0x20) {
-      out += String.fromCharCode((0x20 | (n & 0x1f)) + 63);
-      n >>= 5;
-    }
-    out += String.fromCharCode(n + 63);
-  };
-  for (const [lon, lat] of coords) {
-    const la = Math.round(lat * 1e6);
-    const lo = Math.round(lon * 1e6);
-    enc(la - prevLat);
-    enc(lo - prevLon);
-    prevLat = la;
-    prevLon = lo;
-  }
-  return out;
-}
+export { encodePolyline } from '@wayboo/core';
 
 /** Rota sintética de ~4,5 km com uma curva, a 12 m/s no roteador. */
 export function makeRoute(): Route {

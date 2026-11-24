@@ -152,6 +152,37 @@ export function NavBanner({ nav, rerouting, simulated }: { nav: NavState | null;
   );
 }
 
+/**
+ * Placa do limite do trecho atual e velocidade do GPS. Só aparece quando o OSM tem o limite do trecho;
+ * a velocidade fica vermelha acima do limite.
+ */
+function SpeedLimit({ limitKmh, speedKmh, over }: { limitKmh: number; speedKmh: number | null; over: boolean }) {
+  const t = useTheme();
+  return (
+    <View style={styles.speedRow} pointerEvents="none">
+      <View style={styles.speedSign} accessible accessibilityLabel={`Limite de velocidade: ${limitKmh} km/h`}>
+        <T color="#111111" style={styles.speedSignText}>
+          {limitKmh}
+        </T>
+      </View>
+      {speedKmh !== null ? (
+        <View
+          style={[styles.speedNow, { backgroundColor: over ? t.danger : t.surface, borderColor: over ? t.danger : t.border }]}
+          accessible
+          accessibilityLabel={`Velocidade atual: ${speedKmh} km/h${over ? ', acima do limite' : ''}`}
+        >
+          <T color={over ? '#FFFFFF' : t.text} style={styles.speedNowValue}>
+            {speedKmh}
+          </T>
+          <T variant="caption" color={over ? '#FFFFFF' : t.textMuted}>
+            km/h
+          </T>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 export function NavBottomBar({
   nav,
   muted,
@@ -170,6 +201,9 @@ export function NavBottomBar({
   const pace = nav?.paceRatio ?? 1;
   return (
     <View style={[styles.bottomWrap, { paddingBottom: insets.bottom + 10 }]} pointerEvents="box-none">
+      {nav?.speedLimitKmh != null ? (
+        <SpeedLimit limitKmh={nav.speedLimitKmh} speedKmh={nav.speedKmh} over={nav.overSpeedLimit} />
+      ) : null}
       <Card style={styles.bottom}>
         <IconButton icon="close" label="Encerrar navegação" onPress={onStop} color={t.danger} />
         <View style={{ flex: 1, alignItems: 'center' }}>
@@ -212,6 +246,20 @@ const styles = StyleSheet.create({
   laneCompact: { flex: 1, minWidth: 0, paddingHorizontal: 1, overflow: 'hidden' },
   laneBlank: { width: 3, height: 18, borderRadius: 2, backgroundColor: '#7FB8A4' },
   pills: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  bottomWrap: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 12 },
+  bottomWrap: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 12, gap: 8 },
+  speedRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  speedSign: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    borderWidth: 6,
+    borderColor: '#D32F2F',
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  speedSignText: { fontSize: 22, fontWeight: '800' },
+  speedNow: { minWidth: 60, height: 60, borderRadius: 16, borderWidth: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8 },
+  speedNowValue: { fontSize: 22, fontWeight: '800', lineHeight: 26 },
   bottom: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12 },
 });

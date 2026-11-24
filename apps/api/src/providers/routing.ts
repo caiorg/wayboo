@@ -2,14 +2,19 @@ import { randomUUID } from 'node:crypto';
 import {
   buildSegments,
   decodePolyline,
+  encodePolyline,
   INSTRUCTION_LANGUAGE,
   instructionPtBR,
   parseValhallaLanes,
+  appendSpeedLimits,
+  cumulativeDistances,
+  parseValhallaSpeedLimits,
   type Coord,
   type LatLon,
   type Maneuver,
   type Route,
   type RouteOptions,
+  type SpeedLimitSpan,
 } from '@wayboo/core';
 import { config } from '../config';
 import { fetchJson, HttpError } from './http';
@@ -45,14 +50,84 @@ interface ValhallaResponse {
   alternates?: { trip: ValhallaTrip }[];
 }
 
-function toRoute(trip: ValhallaTrip): Route {
+interface ValhallaTraceAttributes {
+  shape?: string;
+  edges?: unknown;
+}
+
+/**
+ * Tamanho máximo de cada pedaço do shape mandado ao `/trace_attributes`. O padrão do Valhalla
+ * (`service_limits.trace`) é 200 km e 16.000 pontos, e o selfhost usa o padrão.
+ */
+const TRACE_CHUNK_M = 150_000;
+const TRACE_CHUNK_POINTS = 10_000;
+
+/** Pedaços `[início, fim]` (inclusive) do shape; pedaços vizinhos dividem o ponto de junção. */
+function traceChunks(shape: Coord[]): [number, number][] {
+  const cum = cumulativeDistances(shape);
+  const chunks: [number, number][] = [];
+  let start = 0;
+  for (let i = 1; i < shape.length; i++) {
+    const tooLong = cum[i]! - cum[start]! > TRACE_CHUNK_M || i - start >= TRACE_CHUNK_POINTS;
+    if (tooLong && i - 1 > start) {
+      chunks.push([start, i - 1]);
+      start = i - 1;
+    }
+  }
+  if (shape.length > 1) chunks.push([start, shape.length - 1]);
+  return chunks;
+}
+
+/**
+ * Limites de velocidade de um pedaço de shape, pelo `/trace_attributes` com `edge_walk`. O JSON nativo
+ * do `/route` não traz limite. Falha ou resposta que não bate com o shape devolve `undefined`: o
+ * trecho fica sem limite em vez de mostrar um valor errado.
+ */
+async function traceSpeedLimits(shape: Coord[]): Promise<SpeedLimitSpan[] | undefined> {
+  try {
+    const res = await fetchJson<ValhallaTraceAttributes>(`${config.valhallaUrl}/trace_attributes`, {
+      method: 'POST',
+      body: JSON.stringify({
+        encoded_polyline: encodePolyline(shape, 6),
+        shape_match: 'edge_walk',
+        costing: 'auto',
+        units: 'kilometers',
+        filters: { action: 'include', attributes: ['edge.speed_limit', 'edge.begin_shape_index', 'edge.end_shape_index', 'shape'] },
+      }),
+      headers: { 'content-type': 'application/json' },
+      // Curto: roda depois do `/route` e o app desiste do `/plan` em 25 s.
+      timeoutMs: 4000,
+    });
+    if (typeof res.shape !== 'string' || decodePolyline(res.shape, 6).length !== shape.length) return undefined;
+    return parseValhallaSpeedLimits(res.edges, shape.length);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Limites de uma perna, nos índices do shape dela. `undefined` se nenhum pedaço respondeu. */
+async function legSpeedLimits(encoded: string): Promise<SpeedLimitSpan[] | undefined> {
+  const shape = decodePolyline(encoded, 6);
+  const chunks = traceChunks(shape);
+  const results = await Promise.all(chunks.map(([a, b]) => traceSpeedLimits(shape.slice(a, b + 1))));
+  if (results.every((r) => r === undefined)) return undefined;
+  const spans: SpeedLimitSpan[] = [];
+  results.forEach((r, i) => r && appendSpeedLimits(spans, r, chunks[i]![0]));
+  return spans;
+}
+
+/** `speedLimits[i]` são os limites da perna i, nos índices do shape dela. */
+function toRoute(trip: ValhallaTrip, speedLimits: (SpeedLimitSpan[] | undefined)[] = []): Route {
   const geometry: Coord[] = [];
   const maneuvers: Maneuver[] = [];
+  let limits: SpeedLimitSpan[] | undefined;
   trip.legs.forEach((leg, li) => {
     const shape = decodePolyline(leg.shape, 6);
     // Pernas consecutivas repetem o ponto de junção.
     const offset = geometry.length === 0 ? 0 : geometry.length - 1;
     geometry.push(...(offset === 0 ? shape : shape.slice(1)));
+    const legLimits = speedLimits[li];
+    if (legLimits) appendSpeedLimits((limits ??= []), legLimits, offset);
     for (const m of leg.maneuvers) {
       // A chegada numa parada intermediária tem comprimento zero; a partida da perna
       // seguinte vira "continue", para a navegação não encerrar na parada.
@@ -91,6 +166,7 @@ function toRoute(trip: ValhallaTrip): Route {
     highwayShare: distanceM > 0 ? Math.min(1, highwayM / distanceM) : 0,
     segments: buildSegments(geometry, maneuvers),
     provider: 'valhalla',
+    ...(limits ? { speedLimits: limits } : {}),
   };
 }
 
@@ -122,7 +198,11 @@ export const valhalla: RoutingProvider = {
         headers: { 'content-type': 'application/json' },
         timeoutMs: 20000,
       });
-      return [res.trip, ...(res.alternates ?? []).map((a) => a.trip)].map(toRoute);
+      const trips = [res.trip, ...(res.alternates ?? []).map((a) => a.trip)];
+      const limits = await Promise.all(
+        trips.map((t) => Promise.all(t.legs.map((l) => legSpeedLimits(l.shape)))),
+      );
+      return trips.map((t, i) => toRoute(t, limits[i]));
     } catch (e) {
       if (e instanceof HttpError && e.status === 400) {
         throw new HttpError(422, 'Não foi possível traçar uma rota entre esses pontos.');
