@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { PlaceKind } from './learning/routine';
 import type { Tradeoff } from './learning/preferences';
+import type { HolidayRegion } from './learning/holidays';
 import {
   ALERT_TYPES,
   LatLonSchema,
@@ -92,6 +93,8 @@ export interface PlanResponse {
   context: TripContext & { weather: WeatherNow | null };
   departures: DepartureOption[];
   learningLevel: 'nenhum' | 'inicial' | 'bom' | 'alto';
+  /** Região cujos feriados estaduais e municipais entraram no ETA; null usa só o calendário do fuso. Planos antigos não têm. */
+  holidayRegion?: HolidayRegion | null;
 }
 
 export const BriefSchema = z.object({

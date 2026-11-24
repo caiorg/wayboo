@@ -17,6 +17,8 @@ import {
   utility,
   type AlertType,
   type Candidate,
+  type HolidayCalendar,
+  type HolidayRegion,
   type KnownPlace,
   type Place,
   type PlannedRoute,
@@ -36,6 +38,7 @@ import { alertsInBox, CROWD, deletionTicket, getPlaces, getPrefs, loadStats, sav
 import { currentWeather, weatherFlags } from '../providers/geo-services';
 import { HttpError } from '../providers/http';
 import { valhalla } from '../providers/routing';
+import { regionAt, regionalCalendar } from '../holidays';
 
 export type Priority = 'fastest' | 'reliable' | 'familiar' | 'shortest' | null;
 
@@ -61,8 +64,16 @@ function alertsOnRoute(route: Route, alerts: RoadAlert[]): RoadAlert[] {
   return alerts.filter((a) => distanceToPolyline(route.geometry, cum, [a.lon, a.lat]).offsetM < 35);
 }
 
-function slowSpots(route: Route, segDur: number[], departAt: number, timeZone: string, user: StatsMap, crowd: StatsMap): SlowSpot[] {
-  const lt = localTime(departAt, timeZone);
+function slowSpots(
+  route: Route,
+  segDur: number[],
+  departAt: number,
+  timeZone: string,
+  calendar: HolidayCalendar,
+  user: StatsMap,
+  crowd: StatsMap,
+): SlowSpot[] {
+  const lt = localTime(departAt, timeZone, calendar);
   const cum = cumulativeDistances(route.geometry);
   const spots: (SlowSpot & { endM: number })[] = [];
   let elapsed = 0;
@@ -177,16 +188,18 @@ export async function plan(
   priority: Priority = null,
   ticket = deletionTicket(),
 ): Promise<PlanResponse> {
-  const [routes, weather] = await Promise.all([
+  const [routes, weather, region] = await Promise.all([
     valhalla.route([req.origin, ...req.waypoints, req.destination], req.options, req.reroute ? 1 : 2),
     currentWeather(req.origin.lat, req.origin.lon),
+    regionAt(req.origin, req.timeZone),
   ]);
-  return evaluatePlan(userId, req, routes, weather, priority, ticket);
+  return evaluatePlan(userId, req, routes, weather, priority, ticket, region);
 }
 
 /**
  * Avalia rotas já obtidas com o que foi aprendido (separado para testes e simulação sem rede).
  * `ticket` vem de `deletionTicket()` no início do pedido, antes de esperar os provedores.
+ * `region` (de `regionAt`) acrescenta os feriados estaduais e municipais; null usa só o calendário do fuso.
  */
 export function evaluatePlan(
   userId: string,
@@ -195,8 +208,10 @@ export function evaluatePlan(
   weather: WeatherNow | null,
   priority: Priority = null,
   ticket = deletionTicket(),
+  region: HolidayRegion | null = null,
 ): PlanResponse {
   const departAt = req.departAt ?? Date.now();
+  const calendar = regionalCalendar(req.timeZone, region);
 
   const segKeys = routes.flatMap((r) => r.segments.map((s) => s.key));
   const user = loadStats(userId, segKeys);
@@ -216,7 +231,7 @@ export function evaluatePlan(
     const onRoute = alertsOnRoute(route, alerts);
     const ctx = { ...baseCtx, alertsOnRoute: onRoute.length };
     const alertPenaltyS = onRoute.reduce((a, x) => a + ALERT_PENALTY_S[x.type], 0);
-    const eta = predictEta({ route, departAt, timeZone: req.timeZone, user, crowd, ctx, odKey, alertPenaltyS });
+    const eta = predictEta({ route, departAt, timeZone: req.timeZone, user, crowd, ctx, odKey, alertPenaltyS, calendar });
     return { route, eta, alerts: onRoute, familiarity: familiarity(route, user), ctx, alertPenaltyS };
   });
 
@@ -233,7 +248,7 @@ export function evaluatePlan(
     probability: probs[i]!,
     familiarity: d.familiarity,
     alerts: d.alerts,
-    slowSpots: slowSpots(d.route, d.eta.segmentDurationsS, departAt, req.timeZone, user, crowd),
+    slowSpots: slowSpots(d.route, d.eta.segmentDurationsS, departAt, req.timeZone, calendar, user, crowd),
     tags: [],
   }));
   tagRoutes(planned);
@@ -243,7 +258,7 @@ export function evaluatePlan(
   const departures = req.reroute
     ? []
     : departureOptions(
-        { route: rec.route, timeZone: req.timeZone, user, crowd, ctx: rec.ctx, odKey, alertPenaltyS: rec.alertPenaltyS },
+        { route: rec.route, timeZone: req.timeZone, user, crowd, ctx: rec.ctx, odKey, alertPenaltyS: rec.alertPenaltyS, calendar },
         departAt,
         [0, 10, 20, 30, 45, 60, 90],
       );
@@ -265,6 +280,7 @@ export function evaluatePlan(
     context: { ...baseCtx, weather },
     departures,
     learningLevel: conf < 0.05 ? 'nenhum' : conf < 0.3 ? 'inicial' : conf < 0.7 ? 'bom' : 'alto',
+    holidayRegion: region,
   };
   // Usuário apagado durante o planejamento. 409, não 401: com 401 o app registraria o aparelho e repetiria o pedido.
   if (!savePlan(userId, result, ticket)) throw new HttpError(409, 'Dados do usuário apagados durante o planejamento');

@@ -91,6 +91,7 @@ O serviço `api` lê o `.env` (`env_file`). Todas as variáveis da API são opci
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `OLLAMA_API_KEY` | sem padrão (`OLLAMA_API_KEY`: `ollama`) | Chave do provedor. Uma chave remota faz a API chamar serviço externo (ver [O que ainda chama serviço externo](#o-que-ainda-chama-serviço-externo)). |
 | `SUGGESTION_ROUTE_MAX_AGE_MIN` | `1440` | Minutos em que `/suggestions` reaproveita a rota habitual guardada antes de pedir outra ao Valhalla. |
 | `SUGGESTION_ROUTE_RADIUS_M` | `250` | Distância máxima, em metros, entre a origem e o destino do pedido e os pontos da rota guardada para ela ainda valer. |
+| `REGIONAL_HOLIDAYS` | `on` | Feriados estaduais e municipais no ETA. A cada plano, a API pergunta ao Photon o estado e o município da origem, mandando só o centro de uma célula geohash de cerca de 1,2 × 0,6 km, e guarda a resposta em memória por 7 dias. Se o Photon falhar, o ETA usa só os feriados nacionais. Com `off`, a API não faz a consulta. |
 | `OPEN_METEO_URL` | `https://api.open-meteo.com` | Serviço de clima. |
 | `CORS_ORIGIN` | qualquer origem | Uma origem só, para limitar quem chama a API pelo navegador. O app nativo não usa CORS. |
 | `LOG_LEVEL` | `info` | `fatal`, `error`, `warn`, `info`, `debug` ou `trace`. |
@@ -183,6 +184,15 @@ docker compose rm -sf photon && docker volume rm wayboo_photon && docker compose
   ```
 
   O `osm-extract` grava o sha256 do extrato. Se o conteúdo mudou, ele apaga o grafo e o banco de limites do Valhalla, e o `tiles-build` gera um novo PMTiles. O `docker compose up -d` não reinicia contêineres que já estão rodando. Por isso o `restart` é necessário: ao iniciar sem grafo, o Valhalla o reconstrói, e o `go-pmtiles` passa a ler o arquivo novo. Se o conteúdo não mudou, nada é refeito. A geração dos tiles grava em `build/` e só troca o arquivo no fim, então uma interrupção mantém o mapa anterior.
+
+- Feriados estaduais e municipais: vêm de `apps/api/src/data/holidays-br.json`, gerado a partir do dataset [joaopbini/feriados-brasil](https://github.com/joaopbini/feriados-brasil) (MIT). Cada feriado vale em qualquer ano pela data fixa ou pela distância da Páscoa, conforme os três anos anteriores do dataset. Os que já mudaram de data (transferidos) valem só no último ano do dataset. Quando o dataset publicar um ano novo, gere o arquivo de novo e publique a imagem:
+
+  ```sh
+  git clone --depth 1 https://github.com/joaopbini/feriados-brasil.git /tmp/feriados-brasil
+  cd apps/api && bun src/scripts/holidays-import.ts /tmp/feriados-brasil
+  ```
+
+  O script aplica as correções de `CORRECTIONS` (em `holidays-import.ts`), conferidas em lei, onde o dataset diverge da fonte oficial. Se o dataset novo já corrigir um desses casos, ou mudar a regra que a correção remove, o script para com `Correção de <UF>: a regra ... não existe mais no dataset`. Confira de novo a fonte citada na correção, ajuste ou apague a entrada e rode outra vez. Depois, rode `bun run test` em `apps/api`: `test/holidays.test.ts` cobre as correções.
 
 - Estilos do mapa: apague `upstream/` no volume `map` para baixar os estilos atuais do OpenFreeMap:
 

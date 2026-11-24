@@ -75,6 +75,10 @@ const RateLimitEnv = z.object({
 
 const rateLimitEnv = parseEnv(RateLimitEnv);
 
+/** `off` desliga a consulta ao Photon que identifica estado e município para os feriados regionais. */
+const HolidayEnv = z.object({ REGIONAL_HOLIDAYS: optionalText.pipe(z.enum(['on', 'off']).optional()) });
+const holidayEnv = parseEnv(HolidayEnv);
+
 export type AiProviderName = 'anthropic' | 'openai' | 'ollama' | 'openrouter' | 'none';
 
 const PROVIDERS: readonly AiProviderName[] = ['anthropic', 'openai', 'ollama', 'openrouter', 'none'];
@@ -132,6 +136,8 @@ export const config = {
     max: rateLimitEnv.AUTH_DEVICE_RATE_LIMIT,
     windowMs: (rateLimitEnv.AUTH_DEVICE_RATE_WINDOW_MIN ?? 60) * 60_000,
   },
+  /** Feriados estaduais e municipais no ETA, com a região vinda do reverse do Photon. */
+  regionalHolidays: holidayEnv.REGIONAL_HOLIDAYS !== 'off',
   /** Repassado ao `trustProxy` do Fastify; define de onde vem `req.ip`. */
   trustProxy: rateLimitEnv.TRUST_PROXY,
   ai: {
