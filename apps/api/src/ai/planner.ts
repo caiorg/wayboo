@@ -206,9 +206,10 @@ export async function narrateInsights(insights: Insights, log: Log, provider?: A
           km: Math.round(insights.kmDriven),
           lugares: insights.places.map((p) => `${p.label} (${p.visits} visitas)`),
           rotinas: insights.routines,
-          precisao: insights.accuracy.slice(-10),
+          // Só os campos que a narrativa usa: coordenadas, ids e instantes não vão ao provedor.
+          precisao: insights.accuracy.slice(-10).map((a) => ({ errorBasePct: a.errorBasePct, errorLearnedPct: a.errorLearnedPct })),
           preferencias: insights.tradeoffs.map((t) => t.label),
-          lentidao: insights.slowSpots.slice(0, 5),
+          lentidao: insights.slowSpots.slice(0, 5).map((s) => ({ factor: s.factor, observations: s.observations, when: s.when })),
           contexto: insights.contextFactors,
         }),
         schema: z.object({ text: z.string() }),

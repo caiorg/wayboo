@@ -79,7 +79,7 @@ function failing(status: number, provider: Provider) {
   };
 }
 
-type AiCall = { url: string; headers: Headers; redirect?: RequestRedirect };
+type AiCall = { url: string; headers: Headers; redirect?: RequestRedirect; body: string };
 let calls: AiCall[] = [];
 let reply: (url: string) => Response = ok(BRIEF);
 
@@ -108,7 +108,7 @@ beforeEach(() => {
     'fetch',
     vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input instanceof Request ? input.url : input);
-      calls.push({ url, headers: new Headers(init?.headers), redirect: init?.redirect });
+      calls.push({ url, headers: new Headers(init?.headers), redirect: init?.redirect, body: String(init?.body ?? '') });
       return reply(url);
     }),
   );
@@ -210,10 +210,16 @@ describe('BYOK', () => {
     expect(assistant.json()).toMatchObject({ provider: 'ia' });
     expect(calls.at(-1)?.url).toBe('https://api.openai.com/v1/chat/completions');
 
+    // Com uma viagem, `insights` tem precisão e lentidão com coordenadas e ids, que o provedor não precisa receber.
+    await api.drive(user);
     reply = ok({ text: 'Você sai às 8h.' });
+    calls = [];
     const narrative = await app.inject({ method: 'POST', url: '/insights/narrative', headers: auth, payload: {} });
     expect(narrative.statusCode).toBe(200);
     expect(narrative.json()).toEqual({ text: 'Você sai às 8h.', provider: 'ia' });
+    const prompt = (JSON.parse(calls.at(-1)!.body) as { messages: { content: string }[] }).messages.at(-1)!.content;
+    expect(prompt).toContain('errorLearnedPct');
+    expect(prompt).not.toMatch(/"(lat|lon|tripId|at)":/);
   });
 
   it.each([
@@ -267,6 +273,8 @@ describe('BYOK', () => {
     ['sem modelo', { 'x-ai-provider': 'openai', 'x-ai-key': KEYS.openai }],
     ['modelo com ..', byok('openrouter', KEYS.openrouter, '../../key')],
     ['modelo com ?', byok('openrouter', KEYS.openrouter, 'a?b=c')],
+    ['cabeçalhos vazios', { 'x-ai-provider': '', 'x-ai-key': ' ', 'x-ai-model': '' }],
+    ['só x-ai-key vazio', { 'x-ai-key': '' }],
   ])('%s: 400 sem chamar o provedor e sem ecoar a chave', async (_name, headers) => {
     const user = await api.register();
     const res = await brief(user, headers as Record<string, string>);

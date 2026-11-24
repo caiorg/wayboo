@@ -51,8 +51,7 @@ Nenhum desses envios pede consentimento separado no app. A decisão de exigir op
 
 O usuário pode usar a própria chave da Anthropic, da OpenAI ou do OpenRouter em vez do provedor do servidor.
 
-- O app guarda a chave no aparelho, no secure store (Keychain no iOS, Keystore no Android). Na web, ela fica no armazenamento local do navegador, e Ajustes avisa disso.
-- O app manda a chave só nas chamadas de IA (`POST /plan/:id/brief`, `POST /assistant`, `POST /insights/narrative`), nos cabeçalhos `x-ai-provider`, `x-ai-model` e `x-ai-key`, e só por HTTPS (HTTP apenas em `localhost`).
+- A chave vai por requisição, só nas chamadas de IA (`POST /plan/:id/brief`, `POST /assistant`, `POST /insights/narrative`), nos cabeçalhos `x-ai-provider`, `x-ai-model` e `x-ai-key`. Sem nenhum deles, vale o provedor do servidor. Com algum ausente, vazio ou inválido, a API responde 400 sem repetir os valores.
 - A API cria o cliente do provedor na requisição e descarta a chave ao responder. Ela não grava a chave em banco, e por isso a chave não aparece em `GET /me/export`.
 - O log não registra cabeçalhos, e o `redact` do logger cobre `x-ai-key` e `authorization`. Quando o provedor falha, o log leva só a classe do erro e o status HTTP, porque a mensagem da OpenAI ecoa parte da chave.
 - Chave recusada (401), sem permissão (403), sem crédito (402) ou modelo inexistente (404) viram um 422 com mensagem da própria API, sem o texto do provedor. Outras falhas caem nas regras, como sem IA, e nunca na chave do servidor.

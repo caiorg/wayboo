@@ -40,17 +40,20 @@ const KEY = /^[\x21-\x7e]{20,512}$/;
 /** Nome de modelo dos três provedores (`claude-opus-5-5`, `openai/gpt-4o-mini:free`). Sem `..`, `?` e `#`: o nome entra na URL do catálogo do OpenRouter. */
 const MODEL = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 
+const AI_HEADERS = ['x-ai-provider', 'x-ai-model', 'x-ai-key'] as const;
+
 const header = (v: string | string[] | undefined) => (Array.isArray(v) ? v.join(', ') : v)?.trim() || undefined;
 
 /**
  * Lê a chave do usuário dos cabeçalhos. Sem nenhum dos três, `null`: a requisição usa o provedor do servidor.
- * Com só parte deles, 400: quem mandou uma chave não pode cair calado na chave do servidor. As mensagens não ecoam valores.
+ * Com só parte deles, ou com algum vazio, 400: quem mandou uma chave não pode cair calado na chave do servidor. As mensagens não ecoam valores.
  */
 export function byokOf(headers: IncomingHttpHeaders): Byok | null {
+  // Presença, não valor: cabeçalho vazio também é intenção de usar a chave própria e dá 400.
+  if (AI_HEADERS.every((h) => headers[h] === undefined)) return null;
   const provider = header(headers['x-ai-provider']);
   const model = header(headers['x-ai-model']);
   const apiKey = header(headers['x-ai-key']);
-  if (provider === undefined && model === undefined && apiKey === undefined) return null;
   if (!provider || !(BYOK_PROVIDERS as readonly string[]).includes(provider))
     throw new HttpError(400, `x-ai-provider inválido (use ${BYOK_PROVIDERS.join(' | ')})`);
   if (!apiKey || !KEY.test(apiKey)) throw new HttpError(400, 'x-ai-key ausente ou em formato inválido');
