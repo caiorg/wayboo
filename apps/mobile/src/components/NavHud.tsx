@@ -60,8 +60,13 @@ function laneLabel(l: LaneView, i: number): string {
   return `Faixa ${i + 1}: ${arrows}${state}`;
 }
 
+/** Acima disso as faixas dividem a largura da tela em vez de ter largura fixa. */
+const COMPACT_LANES = 6;
+
 /** Faixas da próxima manobra. A faixa recomendada fica clara; as que também servem ficam contornadas. */
 function LaneStrip({ lanes, background }: { lanes: LaneView[]; background: string }) {
+  // Com muitas faixas, 38 pt por faixa passam da largura do celular: elas dividem a linha e as setas encolhem.
+  const compact = lanes.length > COMPACT_LANES;
   // Sem recomendação do roteador, todas as setas ficam claras; com ela, apagam as que não seguem a rota.
   const guided = lanes.some((l) => l.state !== 'other');
   const arrowColor = (l: LaneView, d: LaneIndication) => {
@@ -71,7 +76,7 @@ function LaneStrip({ lanes, background }: { lanes: LaneView[]; background: strin
   };
   return (
     <View
-      style={[styles.lanes, { backgroundColor: background }]}
+      style={[styles.lanes, compact && styles.lanesCompact, { backgroundColor: background }]}
       accessible
       accessibilityLabel={`Faixas da próxima manobra, da esquerda para a direita. ${lanes.map(laneLabel).join('. ')}`}
     >
@@ -80,13 +85,14 @@ function LaneStrip({ lanes, background }: { lanes: LaneView[]; background: strin
           key={i}
           style={[
             styles.lane,
+            compact && styles.laneCompact,
             l.state === 'active' && { backgroundColor: '#FFFFFF' },
             l.state === 'valid' && { borderColor: '#FFFFFF' },
           ]}
         >
           {l.indications.length ? (
             l.indications.map((d) => (
-              <Icon key={d} name={LANE_ICON[d]} size={l.indications.length > 1 ? 18 : 22} color={arrowColor(l, d)} />
+              <Icon key={d} name={LANE_ICON[d]} size={(l.indications.length > 1 ? 18 : 22) - (compact ? 5 : 0)} color={arrowColor(l, d)} />
             ))
           ) : (
             <View style={styles.laneBlank} />
@@ -177,7 +183,7 @@ const styles = StyleSheet.create({
   top: { position: 'absolute', top: 0, left: 0, right: 0, paddingHorizontal: 12, gap: 6 },
   banner: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 16, borderRadius: 22 },
   then: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14 },
-  lanes: { flexDirection: 'row', alignSelf: 'center', gap: 4, padding: 6, borderRadius: 14 },
+  lanes: { flexDirection: 'row', alignSelf: 'center', maxWidth: '100%', gap: 4, padding: 6, borderRadius: 14 },
   lane: {
     minWidth: 38,
     height: 38,
@@ -189,6 +195,8 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: 'transparent',
   },
+  lanesCompact: { alignSelf: 'stretch', gap: 2 },
+  laneCompact: { flex: 1, minWidth: 0, paddingHorizontal: 1, overflow: 'hidden' },
   laneBlank: { width: 3, height: 18, borderRadius: 2, backgroundColor: '#7FB8A4' },
   pills: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   bottomWrap: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 12 },
