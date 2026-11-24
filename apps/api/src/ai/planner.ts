@@ -9,9 +9,11 @@ import {
   type StopCategory,
 } from '@wayboo/core';
 import { z } from 'zod';
-import { tryLlm } from './providers';
+import { tryLlm, type LlmProvider } from './providers';
 
 type Log = (msg: string) => void;
+/** Provedor com a chave do usuário; omitido, vale o do servidor. */
+type Ai = LlmProvider | undefined;
 
 // ---------- interpretação do pedido ----------
 
@@ -74,10 +76,11 @@ export function heuristicIntent(raw: string): Intent {
   };
 }
 
-export async function parseIntent(text: string, log: Log): Promise<{ intent: Intent; provider: string }> {
+export async function parseIntent(text: string, log: Log, provider?: Ai): Promise<{ intent: Intent; provider: string }> {
   const ai = await tryLlm(
     (p) => p.generateObject({ system: INTENT_SYSTEM, prompt: text, schema: IntentSchema, schemaName: 'navigation_intent' }),
     log,
+    provider,
   );
   if (ai) {
     const stops = ai.stops.filter((s) => (STOP_CATEGORIES as readonly string[]).includes(s.category));
@@ -171,7 +174,7 @@ export function heuristicBrief(plan: PlanResponse, timeZone: string): Brief {
   };
 }
 
-export async function briefPlan(plan: PlanResponse, timeZone: string, tradeoffs: string[], log: Log): Promise<Brief> {
+export async function briefPlan(plan: PlanResponse, timeZone: string, tradeoffs: string[], log: Log, provider?: Ai): Promise<Brief> {
   const payload = briefPayload(plan, timeZone, tradeoffs);
   const ai = await tryLlm(async (p) => {
     const out = await p.generateObject({
@@ -181,7 +184,7 @@ export async function briefPlan(plan: PlanResponse, timeZone: string, tradeoffs:
       schemaName: 'route_brief',
     });
     return { ...out, provider: p.name, model: p.model };
-  }, log);
+  }, log, provider);
   if (!ai) return heuristicBrief(plan, timeZone);
   const idx = Number.isInteger(ai.recommendedIndex) && ai.recommendedIndex >= 0 && ai.recommendedIndex < plan.routes.length;
   return { ...ai, recommendedIndex: idx ? ai.recommendedIndex : plan.recommendedIndex };
@@ -193,7 +196,7 @@ const NARRATIVE_SYSTEM = `Você resume, em português do Brasil, o que um app de
 Use só os dados fornecidos. Até 5 frases curtas, cada uma com um fato concreto e útil
 (ex.: horário com mais trânsito, quanto o ETA melhorou, preferência aprendida). Sem floreios.`;
 
-export async function narrateInsights(insights: Insights, log: Log): Promise<{ text: string; provider: string } | null> {
+export async function narrateInsights(insights: Insights, log: Log, provider?: Ai): Promise<{ text: string; provider: string } | null> {
   const ai = await tryLlm(
     (p) =>
       p.generateObject({
@@ -212,6 +215,7 @@ export async function narrateInsights(insights: Insights, log: Log): Promise<{ t
         schemaName: 'insights_summary',
       }),
     log,
+    provider,
   );
   return ai ? { text: ai.text, provider: 'ia' } : null;
 }

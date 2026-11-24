@@ -21,6 +21,7 @@ import {
   type Suggestion,
 } from '@wayboo/core';
 import { parseIntent } from '../ai/planner';
+import type { LlmProvider } from '../ai/providers';
 import { config } from '../config';
 import { db, getPlaces, getPrefs, getRoutineRoutes, getRoutines, saveRoutineRoutes, statsByPrefix } from '../db';
 import { currentWeather, geocode, STOP_QUERY, type BBox } from '../providers/geo-services';
@@ -45,8 +46,15 @@ function nextLocal(hhmm: string, timeZone: string, now = Date.now()): number | n
   return now + diff * 60_000;
 }
 
-export async function assistant(userId: string, text: string, origin: LatLon, timeZone: string, log: Log): Promise<AssistantResponse> {
-  const { intent, provider } = await parseIntent(text, log);
+export async function assistant(
+  userId: string,
+  text: string,
+  origin: LatLon,
+  timeZone: string,
+  log: Log,
+  ai?: LlmProvider,
+): Promise<AssistantResponse> {
+  const { intent, provider } = await parseIntent(text, log, ai);
   const fail = (message: string): AssistantResponse => ({ intent, provider, plan: null, stops: [], message });
 
   let destination: LatLon | null = null;

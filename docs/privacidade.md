@@ -47,6 +47,18 @@ Ao planejar uma rota, a API manda dados de localização a serviços de terceiro
 
 Nenhum desses envios pede consentimento separado no app. A decisão de exigir opt-in para eles está em aberto.
 
+## Chave de IA do usuário (BYOK)
+
+O usuário pode usar a própria chave da Anthropic, da OpenAI ou do OpenRouter em vez do provedor do servidor.
+
+- O app guarda a chave no aparelho, no secure store (Keychain no iOS, Keystore no Android). Na web, ela fica no armazenamento local do navegador, e Ajustes avisa disso.
+- O app manda a chave só nas chamadas de IA (`POST /plan/:id/brief`, `POST /assistant`, `POST /insights/narrative`), nos cabeçalhos `x-ai-provider`, `x-ai-model` e `x-ai-key`, e só por HTTPS (HTTP apenas em `localhost`).
+- A API cria o cliente do provedor na requisição e descarta a chave ao responder. Ela não grava a chave em banco, e por isso a chave não aparece em `GET /me/export`.
+- O log não registra cabeçalhos, e o `redact` do logger cobre `x-ai-key` e `authorization`. Quando o provedor falha, o log leva só a classe do erro e o status HTTP, porque a mensagem da OpenAI ecoa parte da chave.
+- Chave recusada (401), sem permissão (403), sem crédito (402) ou modelo inexistente (404) viram um 422 com mensagem da própria API, sem o texto do provedor. Outras falhas caem nas regras, como sem IA, e nunca na chave do servidor.
+- A chave só vai para o endpoint oficial de cada provedor (`api.anthropic.com`, `api.openai.com`, `openrouter.ai`) e não segue redirecionamento (`redirect: 'error'`). Nessas chamadas, a API ignora `AI_BASE_URL`, `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID` e as credenciais do servidor, e tira os cabeçalhos de `ANTHROPIC_CUSTOM_HEADERS` e `OPENAI_CUSTOM_HEADERS`. O log dos SDKs fica desligado, mesmo com `ANTHROPIC_LOG` ou `OPENAI_LOG` em `debug`.
+- Cada usuário faz até 20 chamadas com a própria chave por minuto, e cada IP (IPv6 por /64) até 60. Sem esse limite, a API serviria para testar chaves alheias.
+
 ## Direitos do titular (LGPD, art. 18)
 
 - `GET /me/export` devolve em JSON todas as linhas das tabelas acima ligadas ao usuário autenticado e os aparelhos (id, registro, último uso e revogação), sem o hash do token.

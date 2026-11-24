@@ -13,8 +13,10 @@ import {
   tradeoffs,
   VoteSchema,
 } from '@wayboo/core';
+import type { Writable } from 'node:stream';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import { z, ZodError } from 'zod';
+import { BYOK_PROVIDERS, BYOK_RATE, byokOf, byokProvider } from './ai/byok';
 import { briefPlan, narrateInsights } from './ai/planner';
 import { llm } from './ai/providers';
 import { config } from './config';
@@ -64,6 +66,7 @@ function revokeOrThrow(userId: string, deviceId: string): void {
 const tzOf = (req: FastifyRequest) => z.string().min(1).max(64).catch('America/Sao_Paulo').parse(req.headers['x-time-zone']);
 const log = (req: FastifyRequest) => (msg: string) => req.log.warn(msg);
 
+
 const ALERT_TTL_MIN: Record<string, number> = {
   accident: 45,
   traffic: 30,
@@ -95,9 +98,17 @@ function vote(userId: string, alertId: string, up: boolean) {
 }
 
 /** Monta a API sem abrir porta, para o servidor e para os testes (`app.inject`). */
-export async function buildApp(opts: { logger?: boolean } = {}) {
+export async function buildApp(opts: { logger?: boolean; logStream?: Writable } = {}) {
   const app = Fastify({
-    logger: opts.logger === false ? false : { level: process.env.LOG_LEVEL ?? 'info' },
+    // O serializador padrão não registra cabeçalhos; o `redact` cobre um serializador ou log futuro que os inclua.
+    logger:
+      opts.logger === false
+        ? false
+        : {
+            level: process.env.LOG_LEVEL ?? 'info',
+            redact: ['req.headers.authorization', 'req.headers["x-ai-key"]'],
+            ...(opts.logStream ? { stream: opts.logStream } : {}),
+          },
     bodyLimit: 2 * 1024 * 1024,
     trustProxy: config.trustProxy,
   });
@@ -122,7 +133,26 @@ export async function buildApp(opts: { logger?: boolean } = {}) {
     if (!reply.hasHeader('cache-control')) reply.header('cache-control', 'no-store');
   });
 
-  app.get('/health', async () => ({ ok: true, ai: llm ? { provider: llm.name, model: llm.model } : null, map: config.mapStyles }));
+  // Cada pedido com chave do usuário chama o provedor com a chave recebida. Sem limite, a API vira um verificador de
+  // chaves alheias: o 422 diz se a chave vale, tem crédito e acessa o modelo. Tokens de aparelho são baratos, por isso
+  // também por IP.
+  const byokPerUser = fixedWindowLimiter(BYOK_RATE.perUser, BYOK_RATE.windowMs);
+  const byokPerIp = fixedWindowLimiter(BYOK_RATE.perIp, BYOK_RATE.windowMs);
+  /** Provedor com a chave do usuário (`x-ai-*`); sem os cabeçalhos, `undefined` e vale o do servidor. */
+  const aiOf = (req: FastifyRequest, userId: string) => {
+    const byok = byokOf(req.headers);
+    if (!byok) return undefined;
+    const waitS = byokPerUser(userId) ?? byokPerIp(ipKey(req.ip));
+    if (waitS) throw new HttpError(429, `Muitas chamadas com a chave de IA própria. Tente de novo em ${waitS} s.`);
+    return byokProvider(byok);
+  };
+
+  app.get('/health', async () => ({
+    ok: true,
+    ai: llm ? { provider: llm.name, model: llm.model } : null,
+    byok: BYOK_PROVIDERS,
+    map: config.mapStyles,
+  }));
 
   // Cada registro cria uma linha em `devices`: sem limite, um cliente enche a tabela.
   const { max, windowMs } = config.authDeviceRateLimit;
@@ -174,17 +204,20 @@ export async function buildApp(opts: { logger?: boolean } = {}) {
 
   app.post('/plan/:id/brief', async (req) => {
     const userId = userOf(req);
+    const ai = aiOf(req, userId);
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const p = getPlan(userId, id);
     if (!p) throw new HttpError(404, 'Plano não encontrado');
     const prefs = getPrefs(userId);
     const labels = prefs.updates > 0 ? tradeoffs(prefs.weights).map((t) => t.label) : [];
-    return briefPlan(p, tzOf(req), labels, log(req));
+    return briefPlan(p, tzOf(req), labels, log(req), ai);
   });
 
   app.post('/assistant', async (req) => {
+    const userId = userOf(req);
+    const ai = aiOf(req, userId);
     const body = AssistantRequestSchema.parse(req.body);
-    return assistant(userOf(req), body.text, body.origin, body.timeZone, log(req));
+    return assistant(userId, body.text, body.origin, body.timeZone, log(req), ai);
   });
 
   app.get('/suggestions', async (req) => {
@@ -274,7 +307,8 @@ export async function buildApp(opts: { logger?: boolean } = {}) {
 
   app.post('/insights/narrative', async (req) => {
     const userId = userOf(req);
-    return (await narrateInsights(insights(userId), log(req))) ?? { text: null, provider: 'nenhum' };
+    const ai = aiOf(req, userId);
+    return (await narrateInsights(insights(userId), log(req), ai)) ?? { text: null, provider: 'nenhum' };
   });
 
   app.patch('/places/:id', async (req) => {
