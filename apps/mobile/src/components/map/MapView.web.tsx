@@ -2,7 +2,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Map as MlMap, setWorkerUrl, type GeoJSONSource, type LayerSpecification, type MapMouseEvent } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { useEffect, useRef } from 'react';
-import { buildSources, GLYPH_IMAGE_SIZE, layerSpecs, MAP_GLYPHS, SOURCE, type MapViewProps } from './mapData';
+import { ALERT_LAYERS, alertIdOf, buildSources, GLYPH_IMAGE_SIZE, layerSpecs, MAP_GLYPHS, SOURCE, type MapViewProps } from './mapData';
 
 // O Metro não resolve o worker que o maplibre-gl 6 carrega via import.meta.url.
 // O postinstall copia o arquivo para public/, que o Expo serve na raiz.
@@ -45,11 +45,11 @@ function loadGlyphImages(): Promise<Record<string, GlyphImage>> {
 }
 
 /** Implementação web com maplibre-gl. Mesmas camadas e fontes da versão nativa. */
-export function MapView({ theme, data, camera, initialCenter, onLongPress, onUserPan }: MapViewProps) {
+export function MapView({ theme, data, camera, initialCenter, onLongPress, onUserPan, onAlertPress }: MapViewProps) {
   const el = useRef<HTMLDivElement>(null);
   const map = useRef<MlMap | null>(null);
-  const latest = useRef({ data, theme, onLongPress, onUserPan });
-  latest.current = { data, theme, onLongPress, onUserPan };
+  const latest = useRef({ data, theme, onLongPress, onUserPan, onAlertPress });
+  latest.current = { data, theme, onLongPress, onUserPan, onAlertPress };
 
   const install = (m: MlMap) => {
     const sources = buildSources(latest.current.data);
@@ -83,6 +83,13 @@ export function MapView({ theme, data, camera, initialCenter, onLongPress, onUse
     m.on('style.load', () => install(m));
     m.on('contextmenu', (e: MapMouseEvent) => latest.current.onLongPress?.({ lat: e.lngLat.lat, lon: e.lngLat.lng }));
     m.on('dragstart', () => latest.current.onUserPan?.());
+    // Os ouvintes por camada valem também para as camadas recriadas depois de trocar o estilo.
+    m.on('click', ALERT_LAYERS, (e) => {
+      const id = alertIdOf(e.features);
+      if (id) latest.current.onAlertPress?.(id);
+    });
+    m.on('mouseenter', ALERT_LAYERS, () => (m.getCanvas().style.cursor = 'pointer'));
+    m.on('mouseleave', ALERT_LAYERS, () => (m.getCanvas().style.cursor = ''));
     return () => {
       m.remove();
       map.current = null;

@@ -1,8 +1,9 @@
-import { ALERT_TYPES, formatDurationPtBR, type AlertType, type FinishTripResponse, type Suggestion } from '@wayboo/core';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { ALERT_TYPES, formatDurationPtBR, type AlertType, type FinishTripResponse, type RoadAlert, type Suggestion } from '@wayboo/core';
+import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { timeAgoPtBR, voteStatus } from '@/lib/alertGroups';
 import type { ReportAccuracy } from '@/lib/gpsAccuracy';
 import { ALERT_COLORS, ALERT_ICONS, ALERT_LABELS, useTheme } from '@/lib/theme';
-import { Button, Card, Icon, T, type IconName } from './ui';
+import { Button, Card, Chip, Icon, T, type IconName } from './ui';
 
 export function ReportSheet({
   accuracy,
@@ -54,6 +55,101 @@ export function ReportSheet({
       </View>
       <T variant="caption">O alerta fica visível para outros motoristas e expira sozinho. Confirmações renovam a validade.</T>
     </Card>
+  );
+}
+
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/** Folha aberta ao tocar num marcador: os alertas do ponto, com votos e botões de confirmar ou negar. */
+export function AlertSheet({
+  alerts,
+  pending,
+  onVote,
+  onClose,
+}: {
+  /** Do mais grave para o menos grave, como no marcador. */
+  alerts: RoadAlert[];
+  /** Alertas com voto a caminho do servidor. */
+  pending: ReadonlySet<string>;
+  onVote: (alert: RoadAlert, up: boolean) => void;
+  onClose: () => void;
+}) {
+  const t = useTheme();
+  const first = alerts[0];
+  const title = alerts.length === 1 && first ? ALERT_LABELS[first.type] : `${alerts.length} alertas neste ponto`;
+  return (
+    <Card style={{ gap: 12 }}>
+      <View style={styles.row}>
+        <T variant="title" style={{ flex: 1 }}>
+          {title}
+        </T>
+        <Pressable accessibilityRole="button" accessibilityLabel="Fechar" onPress={onClose} hitSlop={10}>
+          <Icon name="close" color={t.textMuted} />
+        </Pressable>
+      </View>
+      <ScrollView style={{ maxHeight: 360 }} contentContainerStyle={{ gap: 10 }}>
+        {alerts.map((a) => (
+          <AlertRow key={a.id} alert={a} pending={pending.has(a.id)} onVote={(up) => onVote(a, up)} />
+        ))}
+      </ScrollView>
+      <T variant="caption">Confirmar renova a validade do alerta. Negações seguidas tiram o alerta do mapa. O voto não pode ser trocado.</T>
+    </Card>
+  );
+}
+
+function AlertRow({ alert: a, pending, onVote }: { alert: RoadAlert; pending: boolean; onVote: (up: boolean) => void }) {
+  const t = useTheme();
+  const status = voteStatus(a);
+  const votes = `${plural(a.upvotes, 'confirmação', 'confirmações')} · ${plural(a.downvotes, 'negação', 'negações')}`;
+  return (
+    <View style={[styles.alertRow, { backgroundColor: t.surfaceAlt }]}>
+      <View style={styles.row}>
+        <View style={[styles.circle, { backgroundColor: ALERT_COLORS[a.type] }]}>
+          <Icon name={ALERT_ICONS[a.type] as IconName} color="#FFFFFF" size={22} />
+        </View>
+        <View style={{ flex: 1, gap: 2 }}>
+          <T style={{ fontWeight: '700' }}>{ALERT_LABELS[a.type]}</T>
+          <T variant="caption">
+            {timeAgoPtBR(a.createdAt)} · {votes}
+          </T>
+          {a.note ? (
+            <T variant="caption" color={t.text} numberOfLines={3}>
+              {a.note}
+            </T>
+          ) : null}
+        </View>
+      </View>
+      {status === 'open' ? (
+        <View style={styles.voteRow}>
+          <Button
+            label="Ainda está lá"
+            icon="thumb-up-outline"
+            kind="secondary"
+            loading={pending}
+            onPress={() => onVote(true)}
+            style={styles.voteButton}
+          />
+          <Button
+            label="Não está mais"
+            icon="thumb-down-outline"
+            kind="secondary"
+            disabled={pending}
+            onPress={() => onVote(false)}
+            style={styles.voteButton}
+          />
+        </View>
+      ) : (
+        <View style={{ flexDirection: 'row' }}>
+          {status === 'mine' ? (
+            <Chip label="Você avisou" icon="account-check" tone="primary" />
+          ) : status === 'up' ? (
+            <Chip label="Você confirmou" icon="thumb-up" tone="success" />
+          ) : (
+            <Chip label="Você negou" icon="thumb-down" tone="neutral" />
+          )}
+        </View>
+      )}
+    </View>
   );
 }
 
@@ -131,4 +227,7 @@ const styles = StyleSheet.create({
   circle: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
   suggestion: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14 },
   learnBox: { flexDirection: 'row', gap: 10, padding: 12, borderRadius: 14 },
+  alertRow: { gap: 10, padding: 12, borderRadius: 16 },
+  voteRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  voteButton: { flexGrow: 1, flexBasis: 140, height: 44, paddingHorizontal: 12 },
 });

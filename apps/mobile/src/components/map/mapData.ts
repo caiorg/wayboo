@@ -33,9 +33,20 @@ export interface MapViewProps {
   initialCenter: Coord;
   onLongPress?: (p: LatLon) => void;
   onUserPan?: () => void;
+  /** Toque num marcador de alerta. `id` é o alerta mostrado no marcador; o grupo sai de `groupIdsOf`. */
+  onAlertPress?: (id: string) => void;
 }
 
 export const SOURCE = { routes: 'routes', alerts: 'alerts', spots: 'spots', points: 'points' } as const;
+
+/** Camadas que respondem ao toque num marcador de alerta. */
+export const ALERT_LAYERS = ['alerts-dot', 'alerts-icon', 'alerts-badge', 'alerts-badge-count'];
+
+/** Id do alerta do primeiro marcador tocado, ou `null`. */
+export function alertIdOf(features: readonly { properties?: Record<string, unknown> | null }[] | undefined): string | null {
+  const id = features?.find((f) => typeof f.properties?.id === 'string')?.properties?.id;
+  return typeof id === 'string' ? id : null;
+}
 
 /** Lado, em px lógicos, das imagens de glifo registradas no mapa. As camadas escalam com `icon-size`. */
 export const GLYPH_IMAGE_SIZE = 24;
