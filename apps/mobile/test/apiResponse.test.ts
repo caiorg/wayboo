@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../src/lib/api';
 
 vi.mock('expo-crypto', () => ({ getRandomBytes: (n: number) => new Uint8Array(n) }));
+// O secure store real não carrega fora do app; aqui não há chave de IA própria.
+vi.mock('../src/lib/aiKey', () => ({ readAiKey: async () => null }));
 vi.mock('../src/lib/store', () => {
   const state = { apiUrl: 'http://x', userId: 'u1', credentials: { 'http://x': { token: 't', userId: 'u1' } }, set: () => {}, setCredential: () => {} };
   return {

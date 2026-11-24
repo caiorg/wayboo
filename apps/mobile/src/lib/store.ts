@@ -174,6 +174,16 @@ export interface ServerMap {
   dark: string;
 }
 
+/** Provedores que a API aceita com a chave do usuário (`/health` → `byok`). */
+export const AI_PROVIDERS = ['anthropic', 'openai', 'openrouter'] as const;
+export type AiProviderId = (typeof AI_PROVIDERS)[number];
+
+/** IA com a chave do usuário. A chave em si fica fora dos ajustes (`aiKey.ts`). */
+export interface AiChoice {
+  provider: AiProviderId;
+  model: string;
+}
+
 interface Settings {
   /** UUID anônimo do aparelho, de antes dos tokens. Vai em `legacyUserId` para o servidor adotar os dados antigos. */
   userId: string;
@@ -186,6 +196,8 @@ interface Settings {
   theme: ThemePref;
   avoidTolls: boolean;
   avoidHighways: boolean;
+  /** `null`: a IA do servidor. */
+  ai: AiChoice | null;
   set: (patch: Partial<Omit<Settings, 'set' | 'setCredential' | 'resetIdentity' | 'userId' | 'credentials'>>) => void;
   setCredential: (apiUrl: string, credential: DeviceCredential) => void;
   /** Depois de apagar os dados: descarta a credencial de `apiUrl` e gera outro `userId`, que o servidor adota como usuário novo. */
@@ -209,6 +221,7 @@ export const useSettings = create<Settings>()(
       theme: 'system',
       avoidTolls: false,
       avoidHighways: false,
+      ai: null,
       set: (patch) => set(patch),
       setCredential: (apiUrl, credential) =>
         set((s) => ({ credentials: { ...s.credentials, [normalizeApiUrl(apiUrl)]: credential } })),
