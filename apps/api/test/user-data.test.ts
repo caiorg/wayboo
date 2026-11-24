@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app';
 import { config } from '../src/config';
 import { db, exportUserData, purgeExpiredTraces, saveRoutineRoutes, type UserDataExport } from '../src/db';
@@ -49,6 +49,11 @@ beforeAll(async () => {
   app = await buildApp({ logger: false });
 });
 afterAll(() => app.close());
+// Um teste que falha antes de soltar a espera não deixa os seguintes presos nela.
+afterEach(() => {
+  hold = null;
+  intentHold = null;
+});
 
 const api = client(() => app, ROUTE);
 const { register, call } = api;
