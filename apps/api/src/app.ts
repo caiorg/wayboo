@@ -22,16 +22,18 @@ import {
   alertsInBox,
   db,
   deleteUserData,
+  deviceOfToken,
   exportUserData,
   getPlaces,
   getPlan,
   getPrefs,
   getShareCrowd,
+  listDevices,
   registerDevice,
+  revokeDevice,
   setShareCrowd,
   toAlert,
   upsertPlace,
-  userOfToken,
 } from './db';
 import { geocode, reverseGeocode } from './providers/geo-services';
 import { HttpError } from './providers/http';
@@ -44,11 +46,19 @@ import { addSamples, finishTrip, rerouteTrip, startTrip } from './services/trips
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const BEARER = /^Bearer ([A-Za-z0-9_-]{43})$/;
 
-function userOf(req: FastifyRequest): string {
+function authOf(req: FastifyRequest): { userId: string; deviceId: string } {
   const m = BEARER.exec(req.headers.authorization ?? '');
-  const userId = m ? userOfToken(m[1]!) : null;
-  if (!userId) throw new HttpError(401, 'Token de autenticação ausente ou inválido');
-  return userId;
+  const device = m ? deviceOfToken(m[1]!) : null;
+  if (!device) throw new HttpError(401, 'Token de autenticação ausente ou inválido');
+  return device;
+}
+
+const userOf = (req: FastifyRequest) => authOf(req).userId;
+
+function revokeOrThrow(userId: string, deviceId: string): void {
+  const result = revokeDevice(userId, deviceId);
+  if (result === 'not_found') throw new HttpError(404, 'Aparelho não encontrado');
+  if (result === 'last') throw new HttpError(409, 'Este é o único aparelho conectado. Para sair dele, apague seus dados.');
 }
 
 const tzOf = (req: FastifyRequest) => z.string().min(1).max(64).catch('America/Sao_Paulo').parse(req.headers['x-time-zone']);
@@ -119,7 +129,28 @@ export async function buildApp(opts: { logger?: boolean } = {}) {
 
   app.post('/auth/device', { onRequest: limitDevice }, async (req) => {
     const b = z.object({ token: z.string().regex(TOKEN), legacyUserId: z.string().uuid().optional() }).parse(req.body ?? {});
-    return registerDevice(b.token, b.legacyUserId);
+    const device = registerDevice(b.token, b.legacyUserId);
+    if (!device) throw new HttpError(401, 'Token revogado');
+    return device;
+  });
+
+  // Sair: revoga o token de quem chama.
+  app.post('/auth/logout', async (req, reply) => {
+    const { userId, deviceId } = authOf(req);
+    revokeOrThrow(userId, deviceId);
+    return reply.status(204).send();
+  });
+
+  app.get('/devices', async (req) => {
+    const { userId, deviceId } = authOf(req);
+    return { devices: listDevices(userId).map((d) => ({ ...d, current: d.id === deviceId })) };
+  });
+
+  app.delete('/devices/:id', async (req, reply) => {
+    const userId = userOf(req);
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    revokeOrThrow(userId, id);
+    return reply.status(204).send();
   });
 
   app.get('/geocode', async (req) => {

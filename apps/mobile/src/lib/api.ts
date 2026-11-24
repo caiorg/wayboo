@@ -114,6 +114,10 @@ function newToken(): string {
 /** A identidade em que a chamada começou foi descartada por `deleteMyData`. */
 const identityReset = () => new ApiError(0, 'Os dados deste aparelho foram apagados durante a chamada. Tente de novo.');
 
+/** O token foi revogado em outro aparelho, e este passou a ser um usuário novo. */
+const deviceRevoked = () =>
+  new ApiError(401, 'Este aparelho foi desconectado em outro aparelho e agora é um usuário novo, sem o histórico. Tente de novo.');
+
 /**
  * Um registro em andamento por servidor; nunca compartilhado entre URLs. `userId` é o id local
  * quando o registro começou: depois de `resetIdentity`, o registro antigo não vale mais.
@@ -127,6 +131,9 @@ const registerBlockedUntil = new Map<string, number>();
  * Token deste aparelho para `baseUrl`. Sem registro confirmado, grava um token novo (ou reusa o
  * gravado) e o registra. O registro é idempotente, então repetir após uma resposta perdida
  * devolve o mesmo usuário. Envia o `userId` local para o servidor adotar os dados já gravados nele.
+ * Token revogado em outro aparelho: o servidor nunca mais o aceita. O aparelho troca de id (como
+ * depois de apagar os dados), grava um token novo e o registra como usuário novo. A chamada em curso
+ * era do usuário antigo e falha em vez de seguir com o novo; as próximas usam a credencial nova.
  */
 async function deviceToken(baseUrl: string): Promise<string> {
   await hydrated();
@@ -140,9 +147,22 @@ async function deviceToken(baseUrl: string): Promise<string> {
   registerBlockedUntil.delete(baseUrl);
   const token = saved?.token ?? newToken();
   if (!saved) useSettings.getState().setCredential(baseUrl, { token });
+  const register = (t: string, legacyUserId: string) =>
+    send<{ userId: string }>(baseUrl, 'POST', '/auth/device', { token: t, legacyUserId }, 15000, null);
   const entry = {
     userId: localId,
-    token: send<{ userId: string }>(baseUrl, 'POST', '/auth/device', { token, legacyUserId: localId }, 15000, null)
+    token: register(token, localId)
+      .catch(async (e: unknown): Promise<never> => {
+        if (!(e instanceof ApiError) || e.status !== 401) throw e;
+        if (useSettings.getState().userId !== localId) throw identityReset();
+        useSettings.getState().resetIdentity(baseUrl);
+        const newId = useSettings.getState().userId;
+        const fresh = newToken();
+        useSettings.getState().setCredential(baseUrl, { token: fresh });
+        const { userId } = await register(fresh, newId);
+        if (useSettings.getState().userId === newId) useSettings.getState().setCredential(baseUrl, { token: fresh, userId });
+        throw deviceRevoked();
+      })
       .then(({ userId }) => {
         // Resposta que chega depois de apagar os dados: o token descartado não grava nem é usado.
         if (useSettings.getState().userId !== localId) throw identityReset();
@@ -189,6 +209,16 @@ export interface UserDataExport {
   userId: string;
   exportedAt: string;
   tables: Record<string, unknown[]>;
+}
+
+/** Um aparelho ativo do usuário em `GET /devices`. */
+export interface DeviceInfo {
+  id: string;
+  createdAt: string;
+  /** `null` em aparelhos registrados antes de o servidor guardar o último uso. */
+  lastSeenAt: string | null;
+  /** O aparelho que fez a chamada. */
+  current: boolean;
 }
 
 export interface Health {
@@ -244,6 +274,23 @@ export const api = {
       throw new LocalSaveError('Dados apagados no servidor, mas não foi possível salvar o novo identificador neste aparelho.');
     });
     return res;
+  },
+  devices: () => request<{ devices: DeviceInfo[] }>('GET', '/devices'),
+  /** Revoga outro aparelho do usuário. O servidor recusa o último aparelho ativo com 409. */
+  revokeDevice: (id: string) => request<unknown>('DELETE', `/devices/${encodeURIComponent(id)}`),
+  /**
+   * Revoga o token deste aparelho e troca o id local; a próxima chamada registra um usuário novo.
+   * O servidor recusa com 409 se este for o único aparelho ativo: o caminho é apagar os dados.
+   */
+  logout: async () => {
+    const baseUrl = currentUrl();
+    await hydrated();
+    const localId = useSettings.getState().userId;
+    await request<unknown>('POST', '/auth/logout', {});
+    // Uma chamada concorrente pode já ter trocado a identidade (token revogado): a nova fica.
+    if (useSettings.getState().userId === localId) useSettings.getState().resetIdentity(baseUrl);
+    // Se a gravação falhar, o app reabre com o token revogado, leva 401 e registra um token novo.
+    await settingsSaved().catch(() => {});
   },
   updatePlace: (id: string, patch: { kind?: 'home' | 'work' | 'other'; name?: string | null }) =>
     request<unknown>('PATCH', `/places/${id}`, patch),

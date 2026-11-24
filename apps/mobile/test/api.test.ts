@@ -31,9 +31,11 @@ vi.mock('expo-secure-store', () => ({
   deleteItemAsync: async (k: string) => void h.secure.delete(k),
 }));
 
-/** Imita `registerDevice`, `userOfToken` e `DELETE /me` da API. */
+/** Imita `registerDevice`, `deviceOfToken`, `DELETE /me` e a revogação de aparelhos da API. */
 function fakeServer() {
   const devices = new Map<string, string>();
+  /** Tokens revogados: recebem 401 nas rotas e no registro. */
+  const revoked = new Set<string>();
   const registered: string[] = [];
   /** Chamadas autenticadas, com o token usado. */
   const calls: { route: string; token: string }[] = [];
@@ -53,7 +55,7 @@ function fakeServer() {
       h.reached();
       await h.gate;
     }
-    return new Response(JSON.stringify(body), { status });
+    return new Response(status === 204 ? null : JSON.stringify(body), { status });
   };
   /** Enquanto definido, `POST /auth/device` responde 429 com este `Retry-After`. */
   let limited: string | null = null;
@@ -69,6 +71,7 @@ function fakeServer() {
         });
       }
       const { token, legacyUserId } = JSON.parse(String(init.body)) as { token: string; legacyUserId?: string };
+      if (revoked.has(token)) return json(route, 401, { error: 'Token revogado' });
       const known = devices.get(token);
       if (known) return json(route, 200, { userId: known });
       const claimed = [...devices.values()].includes(legacyUserId ?? '');
@@ -79,15 +82,23 @@ function fakeServer() {
     }
     const token = String((init.headers as Record<string, string>).authorization ?? '').replace('Bearer ', '');
     calls.push({ route, token });
-    const userId = devices.get(token);
+    const userId = revoked.has(token) ? undefined : devices.get(token);
     if (!userId) return json(route, 401, { error: 'token inválido' });
+    if (path === '/auth/logout') {
+      const active = [...devices].filter(([t, u]) => u === userId && !revoked.has(t));
+      if (active.length === 1) return json(route, 409, { error: 'Este é o único aparelho conectado.' });
+      revoked.add(token);
+      return json(route, 204, null);
+    }
     if (path === '/me' && init.method === 'DELETE') {
       for (const [t, u] of devices) if (u === userId) devices.delete(t);
       return json(route, 200, { deleted: { trips: 3 } });
     }
     return json(route, 200, { shareCrowd: false });
   });
-  return { fetch, registered, calls, hold, limit };
+  /** Segundo aparelho do mesmo usuário (a API ainda não tem rota para vincular). */
+  const addDevice = (userId: string) => devices.set(crypto.randomUUID(), userId);
+  return { fetch, registered, calls, hold, limit, revoked, addDevice };
 }
 
 beforeEach(() => {
@@ -221,6 +232,97 @@ describe('apagar os dados', () => {
     write.release();
     await expect(stale).rejects.toThrow();
     expect(server.calls.slice(sent).filter((c) => c.route === 'POST /alerts')).toEqual([]);
+  });
+});
+
+describe('aparelhos', () => {
+  it('token revogado em outro aparelho: vira usuário novo e não repete a chamada do usuário antigo', async () => {
+    const server = fakeServer();
+    vi.stubGlobal('fetch', server.fetch);
+    const { api } = await import('../src/lib/api');
+    const { normalizeApiUrl, useSettings } = await import('../src/lib/store');
+    const url = normalizeApiUrl(useSettings.getState().apiUrl);
+
+    await api.privacy();
+    const before = useSettings.getState().credentials[url]!;
+    server.revoked.add(before.token);
+
+    // O DELETE era do usuário antigo: com o token novo, apagaria os dados do usuário novo.
+    await expect(api.deleteMyData()).rejects.toThrow(/desconectado/);
+    const after = useSettings.getState().credentials[url]!;
+    expect(after.token).not.toBe(before.token);
+    expect(after.userId).not.toBe(before.userId);
+    expect(after.userId).toBe(useSettings.getState().userId);
+    expect(server.registered).toEqual([before.userId, after.userId]);
+    expect(server.calls.filter((c) => c.token === after.token)).toEqual([]);
+
+    await expect(api.privacy()).resolves.toEqual({ shareCrowd: false });
+    expect(server.calls.at(-1)).toEqual({ route: 'GET /privacy', token: after.token });
+    expect(server.registered).toHaveLength(2);
+  });
+
+  it('sair descarta a credencial e o id local; a próxima chamada registra um usuário novo', async () => {
+    const server = fakeServer();
+    vi.stubGlobal('fetch', server.fetch);
+    const { api } = await import('../src/lib/api');
+    const { normalizeApiUrl, useSettings } = await import('../src/lib/store');
+    const url = normalizeApiUrl(useSettings.getState().apiUrl);
+
+    await api.privacy();
+    const before = useSettings.getState().credentials[url]!;
+    const localId = useSettings.getState().userId;
+    server.addDevice(before.userId!);
+
+    await api.logout();
+    expect(server.revoked.has(before.token)).toBe(true);
+    expect(useSettings.getState().credentials[url]).toBeUndefined();
+    expect(useSettings.getState().userId).not.toBe(localId);
+
+    await api.privacy();
+    expect(useSettings.getState().credentials[url]!.userId).not.toBe(before.userId);
+  });
+
+  it('resposta atrasada do logout não descarta o usuário novo criado por uma chamada concorrente', async () => {
+    const server = fakeServer();
+    vi.stubGlobal('fetch', server.fetch);
+    const { api } = await import('../src/lib/api');
+    const { normalizeApiUrl, useSettings } = await import('../src/lib/store');
+    const url = normalizeApiUrl(useSettings.getState().apiUrl);
+
+    await api.privacy();
+    server.addDevice(useSettings.getState().credentials[url]!.userId!);
+
+    // O servidor já revogou, mas a resposta do logout demora.
+    const out = server.hold('POST /auth/logout');
+    const leaving = api.logout();
+    await out.arrived;
+    // Outra chamada leva 401 e registra um usuário novo pela recuperação.
+    await expect(api.privacy()).rejects.toThrow(/desconectado/);
+    const fresh = useSettings.getState().credentials[url];
+    const freshId = useSettings.getState().userId;
+
+    out.release();
+    await leaving;
+    expect(useSettings.getState().credentials[url]).toEqual(fresh);
+    expect(useSettings.getState().userId).toBe(freshId);
+  });
+
+  it('sair do único aparelho é recusado e mantém a credencial', async () => {
+    const server = fakeServer();
+    vi.stubGlobal('fetch', server.fetch);
+    const { api, ApiError } = await import('../src/lib/api');
+    const { normalizeApiUrl, useSettings } = await import('../src/lib/store');
+    const url = normalizeApiUrl(useSettings.getState().apiUrl);
+
+    await api.privacy();
+    const before = useSettings.getState().credentials[url];
+    const localId = useSettings.getState().userId;
+
+    const err = await api.logout().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as InstanceType<typeof ApiError>).status).toBe(409);
+    expect(useSettings.getState().credentials[url]).toEqual(before);
+    expect(useSettings.getState().userId).toBe(localId);
   });
 });
 
