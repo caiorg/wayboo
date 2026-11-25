@@ -172,7 +172,7 @@ export default function SettingsScreen() {
         <T>{label}</T>
         {hint ? <T variant="caption">{hint}</T> : null}
       </View>
-      <Switch value={value} onValueChange={onChange} trackColor={{ true: t.primary, false: t.border }} />
+      <Switch value={value} onValueChange={onChange} trackColor={{ true: t.primary, false: t.border }} accessibilityLabel={label} />
     </View>
   );
 

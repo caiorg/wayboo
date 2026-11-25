@@ -54,9 +54,27 @@ describe('publishLocations', () => {
     expect(useLocationStore.getState().fix?.t).toBe(2000);
   });
 
+  it('ignora um lote atrasado da task que repete leituras de mais de um minuto atrás', () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(160_000);
+    const seen: number[] = [];
+    const unsub = useLocationStore.subscribe((st) => {
+      if (st.fix) seen.push(st.fix.t);
+    });
+    publishLocations([loc(100_000)]);
+    publishLocations([loc(160_000)]);
+    now.mockReturnValue(170_000);
+    publishLocations([loc(100_000), loc(160_000)]);
+    unsub();
+    now.mockRestore();
+    expect(seen).toEqual([100_000, 160_000]);
+  });
+
   it('volta a aceitar leituras quando o relógio do aparelho volta mais de um minuto', () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000_000);
     publishLocations([loc(10_000_000)]);
+    now.mockReturnValue(1000);
     publishLocations([loc(1000)]);
+    now.mockRestore();
     expect(useLocationStore.getState().fix?.t).toBe(1000);
   });
 

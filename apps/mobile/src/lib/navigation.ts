@@ -63,9 +63,16 @@ let navigator: Navigator | null = null;
 let unsubscribe: (() => void) | null = null;
 let simTimer: ReturnType<typeof setInterval> | null = null;
 let flushTimer: ReturnType<typeof setInterval> | null = null;
-let buffer: TraceSample[] = [];
-let flushing: Promise<void> | null = null;
-let lastFlushAt = 0;
+/** Rastro de uma viagem. Cada navegação tem o seu: um envio atrasado de outra viagem não mistura amostras. */
+interface Trace {
+  tripId: string | null;
+  samples: TraceSample[];
+  sending: Promise<void> | null;
+  lastSentAt: number;
+}
+
+const newTrace = (): Trace => ({ tripId: null, samples: [], sending: null, lastSentAt: Date.now() });
+let trace = newTrace();
 let lastRerouteAt = 0;
 let finishing = false;
 /** Sobe a cada início e fim: uma resposta assíncrona de uma navegação que já acabou é descartada. */
@@ -186,26 +193,24 @@ function speak(text: string) {
   });
 }
 
-/** Um envio por vez. Quem chama durante um envio espera o mesmo, que segue até o buffer esvaziar. */
-function flush(): Promise<void> {
-  flushing ??= sendBuffer().finally(() => {
-    flushing = null;
+/** Um envio por vez em cada viagem. Quem chama durante um envio espera o mesmo, que segue até o rastro esvaziar. */
+function flush(t: Trace = trace): Promise<void> {
+  t.sending ??= send(t).finally(() => {
+    t.sending = null;
   });
-  return flushing;
+  return t.sending;
 }
 
-async function sendBuffer() {
-  lastFlushAt = Date.now();
-  const { tripId } = useNavSession.getState();
-  // Para se outra navegação começar durante o envio: o buffer novo é de outra viagem.
-  while (tripId && buffer.length > 0 && useNavSession.getState().tripId === tripId) {
-    const batch = buffer.slice(0, MAX_SAMPLES_PER_POST);
-    buffer = buffer.slice(batch.length);
+async function send(t: Trace) {
+  t.lastSentAt = Date.now();
+  while (t.tripId && t.samples.length > 0) {
+    const batch = t.samples.slice(0, MAX_SAMPLES_PER_POST);
+    t.samples = t.samples.slice(batch.length);
     try {
-      await api.samples(tripId, batch);
+      await api.samples(t.tripId, batch);
     } catch {
       // Sem rede: devolve ao buffer para a próxima tentativa (limite para não crescer sem fim).
-      buffer = [...batch, ...buffer].slice(-5000);
+      t.samples = [...batch, ...t.samples].slice(-5000);
       return;
     }
   }
@@ -252,9 +257,9 @@ function onFix(fix: NavFix) {
   useNavSession.setState(stops === s.stops ? { nav: st } : { nav: st, stops });
   if (st.announcement) speak(st.announcement);
   if (!s.simulated) {
-    buffer.push({ t: fix.t, lat: fix.lat, lon: fix.lon, speed: fix.speed ?? null, heading: fix.heading ?? null, accuracy: fix.accuracy ?? null });
+    trace.samples.push({ t: fix.t, lat: fix.lat, lon: fix.lon, speed: fix.speed ?? null, heading: fix.heading ?? null, accuracy: fix.accuracy ?? null });
     // O Android pausa os timers do JS com o app em segundo plano; os fixes da task continuam chegando.
-    if (Date.now() - lastFlushAt >= FLUSH_EVERY_MS) void flush();
+    if (Date.now() - trace.lastSentAt >= FLUSH_EVERY_MS) void flush();
   }
   if (st.arrived) {
     void stopNavigation();
@@ -266,7 +271,7 @@ function onFix(fix: NavFix) {
 export async function startNavigation(plan: PlanResponse, routeIndex: number, simulate: boolean): Promise<void> {
   cleanup();
   finishing = false;
-  buffer = [];
+  const t = (trace = newTrace());
   const chosen = plan.routes[routeIndex];
   if (!chosen) return;
   // Vozes podem ter sido instaladas desde a última navegação; já começa a buscar para a primeira fala.
@@ -312,13 +317,14 @@ export async function startNavigation(plan: PlanResponse, routeIndex: number, si
 
   try {
     const { tripId } = await api.startTrip(plan.planId, routeIndex);
+    t.tripId = tripId;
     useNavSession.setState({ tripId });
   } catch (e) {
     // Sem servidor a navegação continua; só não haverá aprendizado desta viagem.
     useNavSession.setState({ error: e instanceof Error ? e.message : 'Viagem não registrada' });
   }
-  lastFlushAt = Date.now();
-  flushTimer = setInterval(() => void flush(), FLUSH_EVERY_MS);
+  t.lastSentAt = Date.now();
+  flushTimer = setInterval(() => void flush(t), FLUSH_EVERY_MS);
   unsubscribe = useLocationStore.subscribe((state, prev) => {
     if (state.fix && state.fix !== prev.fix) onFix(state.fix);
   });
@@ -330,12 +336,13 @@ export async function stopNavigation(): Promise<void> {
   if (finishing) return;
   finishing = true;
   const { tripId, simulated, nav } = useNavSession.getState();
+  const t = trace;
   cleanup();
   if (simulated || !tripId) {
     useNavSession.setState({ status: nav?.arrived ? 'arrived' : 'idle', result: null });
     return;
   }
-  await flush();
+  await flush(t);
   try {
     const result = await api.finishTrip(tripId);
     useNavSession.setState({ status: 'arrived', result });

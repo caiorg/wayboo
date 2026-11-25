@@ -15,7 +15,8 @@ export const useLocationStore = create<LocationState>(() => ({ fix: null, permis
 let subscription: Location.LocationSubscription | null = null;
 /** Horário da última leitura real publicada. Não usa o fix do store, que a simulação adianta. */
 let lastPublishedT = -Infinity;
-/** Leitura repetida chega segundos depois. Uma bem mais antiga indica que o relógio do aparelho voltou. */
+/** Relógio do aparelho na última publicação. Se ele voltar mais que CLOCK_JUMP_MS, os horários do GPS recomeçam. */
+let lastPublishedAt = -Infinity;
 const CLOCK_JUMP_MS = 60_000;
 
 function toFix(p: Location.LocationObject): NavFix {
@@ -31,12 +32,16 @@ function toFix(p: Location.LocationObject): NavFix {
 
 /**
  * Publica as leituras do GPS em ordem de horário, uma por vez, para a navegação processar cada ponto.
- * Com a navegação em segundo plano, o watcher e a task entregam os mesmos pontos: repetidas e pouco mais antigas são ignoradas.
+ * Com a navegação em segundo plano, o watcher e a task entregam os mesmos pontos, às vezes num lote atrasado: repetidas e
+ * mais antigas são ignoradas. A volta do relógio se detecta pelo relógio do aparelho, não pela diferença entre leituras.
  */
 export function publishLocations(locations: readonly Location.LocationObject[]): void {
+  const now = Date.now();
+  if (now < lastPublishedAt - CLOCK_JUMP_MS) lastPublishedT = -Infinity;
   for (const p of [...locations].sort((a, b) => a.timestamp - b.timestamp)) {
-    if (p.timestamp <= lastPublishedT && p.timestamp > lastPublishedT - CLOCK_JUMP_MS) continue;
+    if (p.timestamp <= lastPublishedT) continue;
     lastPublishedT = p.timestamp;
+    lastPublishedAt = now;
     useLocationStore.setState({ fix: toFix(p) });
   }
 }
@@ -44,6 +49,7 @@ export function publishLocations(locations: readonly Location.LocationObject[]):
 /** Só para testes. */
 export function resetPublishedLocations(): void {
   lastPublishedT = -Infinity;
+  lastPublishedAt = -Infinity;
 }
 
 /** Pede permissão e mantém um único watcher de GPS para o app inteiro. */

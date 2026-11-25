@@ -398,6 +398,63 @@ describe('envio do rastro', () => {
   });
 });
 
+describe('envio do rastro entre viagens', () => {
+  const samples = vi.mocked(api.samples);
+  const finishTrip = vi.mocked(api.finishTrip);
+  const at = (t: number) => ({ t, lat: 0, lon: 0 });
+  const sentTo = (tripId: string) => samples.mock.calls.filter(([id]) => id === tripId).flatMap(([, b]) => b.map((x) => x.t));
+  let now = 1_000_000;
+
+  beforeEach(() => {
+    now = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    vi.mocked(api.startTrip).mockResolvedValueOnce({ tripId: 'A' }).mockResolvedValueOnce({ tripId: 'B' });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Viagem A com um envio pendente, depois a viagem B começa. */
+  async function startAThenB(pendingA: Promise<{ stored: number }>) {
+    samples.mockReturnValueOnce(pendingA);
+    await startNavigation(plan, 0, false);
+    useLocationStore.setState({ fix: at(1) });
+    now += 16_000;
+    useLocationStore.setState({ fix: at(2) });
+    await settle();
+    expect(sentTo('A')).toEqual([1, 2]);
+    await startNavigation(plan, 0, false);
+    await settle();
+  }
+
+  it('encerra a viagem B com o rastro dela, mesmo com um envio da viagem A pendente', async () => {
+    let releaseA!: () => void;
+    await startAThenB(new Promise((r) => (releaseA = () => r({ stored: 2 }))));
+    useLocationStore.setState({ fix: at(3) });
+    const stopping = stopNavigation();
+    await settle();
+    releaseA();
+    await stopping;
+    // B começa com o último fix conhecido (2). Com o rastro de A misturado, seria [1, 2, 2, 3].
+    expect(sentTo('B')).toEqual([2, 3]);
+    const sendB = samples.mock.invocationCallOrder[samples.mock.calls.findIndex(([id]) => id === 'B')]!;
+    expect(sendB).toBeLessThan(finishTrip.mock.invocationCallOrder[0]!);
+    expect(finishTrip).toHaveBeenCalledWith('B');
+  });
+
+  it('um envio da viagem A que falha depois de B começar não põe o rastro de A em B', async () => {
+    let failA!: () => void;
+    await startAThenB(new Promise((_, reject) => (failA = () => reject(new Error('offline')))));
+    failA();
+    await settle();
+    useLocationStore.setState({ fix: at(3) });
+    await stopNavigation();
+    // B começa com o último fix conhecido (2). Com o rastro de A misturado, seria [1, 2, 2, 3].
+    expect(sentTo('B')).toEqual([2, 3]);
+  });
+});
+
 describe('navegação com a tela bloqueada sem suporte (web)', () => {
   it('não tenta iniciar nem mostra aviso', async () => {
     mocks.bgSupported = false;
