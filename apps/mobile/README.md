@@ -34,7 +34,7 @@ bunx eas-cli build --profile development --platform android   # APK
 bunx eas-cli build --profile development --platform ios       # .app para o simulador
 ```
 
-No fim, o EAS mostra um link e um QR code. No Android, abra o link no aparelho e instale o APK. No simulador iOS, `bunx eas-cli build:run -p ios --latest` baixa e instala o último build.
+No fim, o EAS mostra um link e um QR code. No Android, abra o link no aparelho e instale o APK. No simulador iOS, `bunx eas-cli build:run -p ios --profile development --latest` baixa e instala o último build desse perfil.
 
 Perfis do `eas.json`:
 
@@ -42,9 +42,9 @@ Perfis do `eas.json`:
 |---|---|
 | `development` | dev client; APK no Android e build de simulador no iOS. Não pede conta Apple paga. |
 | `development-device` | dev client para iPhone físico. Pede conta Apple Developer paga e o aparelho registrado com `bunx eas-cli device:create`. |
-| `preview` | app sem dev client, com o JavaScript embutido, para testar sem o Metro. |
+| `preview` | app sem dev client, com o JavaScript embutido, para testar sem o Metro. No iOS gera build para aparelho, então também pede conta Apple paga e aparelho registrado. |
 
-O `preview` não tem o IP do Metro, então a URL da API cai em `localhost`. Defina `EXPO_PUBLIC_API_URL` nas [variáveis de ambiente do EAS](https://docs.expo.dev/eas/environment-variables/) com uma URL HTTPS. O Android bloqueia HTTP sem TLS em build release.
+O `preview` não tem o IP do Metro, então a URL da API cai em `localhost`. Defina `EXPO_PUBLIC_API_URL` nas [variáveis de ambiente do EAS](https://docs.expo.dev/eas/environment-variables/) com uma URL HTTPS. Android e iOS bloqueiam HTTP sem TLS em build release.
 
 ## Abrir o app no build
 
@@ -52,4 +52,6 @@ O `preview` não tem o IP do Metro, então a URL da API cai em `localhost`. Defi
 2. Em `apps/mobile`, suba o Metro: `bunx expo start`. Com o `expo-dev-client` instalado, o Metro abre no development build por padrão.
 3. Abra o Wayboo no aparelho. Ele lista os servidores Metro da rede. Se não aparecer, leia o QR code do terminal com a câmera.
 
-O app chama a API em `http://<IP da máquina do Metro>:8787`. O aparelho precisa estar na mesma rede que a máquina. Com VPN no celular ou rede que isola os aparelhos, exponha a API por um túnel HTTPS (`cloudflared tunnel --url http://localhost:8787`) e rode o Metro com `EXPO_PUBLIC_API_URL=<url do túnel>`. A URL também pode ser trocada em Ajustes.
+O app chama a API em `http://<IP da máquina do Metro>:8787`. O aparelho precisa estar na mesma rede que a máquina. Com VPN no celular ou rede que isola os aparelhos, exponha a API por um túnel HTTPS (`cloudflared tunnel --url http://localhost:8787`) e rode o Metro com `EXPO_PUBLIC_API_URL=<url do túnel>`.
+
+O app grava a URL da API na primeira abertura. Se a máquina mudar de IP ou de rede, ou se você passar a usar o túnel depois, troque a URL em Ajustes ou apague os dados do app.
