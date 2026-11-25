@@ -6,7 +6,7 @@ Os comandos abaixo rodam em `apps/mobile`. As pastas `ios/` e `android/` são ge
 
 ## Development build
 
-O development build é o app com `expo-dev-client`. Ele instala uma vez e carrega o JavaScript do Metro da sua máquina, como o Expo Go. Gere um build novo quando mudar dependência nativa, plugin ou `app.json`. Mudança só de JavaScript não pede build novo.
+O development build é o app com `expo-dev-client`. Ele instala uma vez e carrega o JavaScript do Metro da sua máquina, como o Expo Go. Gere um build novo quando mudar dependência nativa, plugin ou `app.json`. Mudança só de JavaScript não pede build novo. O `expo run:*` só roda o prebuild quando `ios/` ou `android/` não existem. Depois de mudar `app.json` ou plugin, rode `bunx expo prebuild` antes do build local para recriar essas pastas. O EAS gera as pastas a cada build.
 
 ### Local
 
@@ -52,6 +52,11 @@ O `preview` não tem o IP do Metro, então a URL da API cai em `localhost`. Defi
 2. Em `apps/mobile`, suba o Metro: `bunx expo start`. Com o `expo-dev-client` instalado, o Metro abre no development build por padrão.
 3. Abra o Wayboo no aparelho. Ele lista os servidores Metro da rede. Se não aparecer, leia o QR code do terminal com a câmera.
 
-O app chama a API em `http://<IP da máquina do Metro>:8787`. O aparelho precisa estar na mesma rede que a máquina. Com VPN no celular ou rede que isola os aparelhos, exponha a API por um túnel HTTPS (`cloudflared tunnel --url http://localhost:8787`) e rode o Metro com `EXPO_PUBLIC_API_URL=<url do túnel>`.
+O app chama a API em `http://<IP da máquina do Metro>:8787`. O aparelho precisa estar na mesma rede que a máquina. Com VPN no celular ou rede que isola os aparelhos, o aparelho não alcança nem o Metro nem a API. Nesse caso, exponha os dois:
+
+```bash
+cloudflared tunnel --url http://localhost:8787                  # em outro terminal; anote a URL HTTPS
+EXPO_PUBLIC_API_URL=<url do túnel> bunx expo start --tunnel     # em apps/mobile; o QR code passa a apontar para o túnel do Metro
+```
 
 O app grava a URL da API na primeira abertura. Se a máquina mudar de IP ou de rede, ou se você passar a usar o túnel depois, troque a URL em Ajustes ou apague os dados do app.
