@@ -10,7 +10,7 @@ import { ArrivalCard, ReportSheet, SuggestionCard } from '@/components/Panels';
 import { RouteSheet } from '@/components/RouteSheet';
 import { SearchPanel } from '@/components/SearchPanel';
 import { Card, IconButton, T } from '@/components/ui';
-import { api, RegistrationLimitError, type GeocodeResult } from '@/lib/api';
+import { AiKeyError, api, RegistrationLimitError, type GeocodeResult } from '@/lib/api';
 import { checkReportAccuracy } from '@/lib/gpsAccuracy';
 import { startLocation, useLocationStore } from '@/lib/location';
 import { dismissSession, startNavigation, stopNavigation, toggleMute, useNavSession } from '@/lib/navigation';
@@ -148,10 +148,14 @@ export default function MapScreen() {
           setBrief(b);
           if (!userPicked.current) setSelected(b.recommendedIndex);
         })
-        .catch(() => setBrief(null))
+        .catch((e: unknown) => {
+          setBrief(null);
+          // Chave própria ausente, sem HTTPS ou recusada: sem aviso, o briefing sumiria sem motivo.
+          if (e instanceof AiKeyError) notify(e.message);
+        })
         .finally(() => setBriefLoading(false));
     },
-    [fitPlan],
+    [fitPlan, notify],
   );
 
   const origin = (): LatLon => {
