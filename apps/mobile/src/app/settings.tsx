@@ -1,13 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
 import { ScrollView, StyleSheet, Switch, TextInput, View } from 'react-native';
 import { Button, Card, Chip, T } from '@/components/ui';
+import { aiKeyInBrowser, clearAi, hasAiKey, saveAi } from '@/lib/aiKey';
 import { BACKGROUND_LOCATION_SUPPORTED } from '@/lib/backgroundLocation';
 import { api, ApiError, LocalSaveError, RegistrationLimitError, type DeviceInfo } from '@/lib/api';
 import { exportMyData, type ExportResult } from '@/lib/exportData';
-import { normalizeApiUrl, useSettings, type ThemePref } from '@/lib/store';
+import { AI_PROVIDERS, normalizeApiUrl, useSettings, type AiProviderId, type ThemePref } from '@/lib/store';
 import { useTheme } from '@/lib/theme';
 
 const day = (iso: string) => new Date(iso).toLocaleDateString('pt-BR');
+
+/** `model`: sugestão inicial; vazio quando não há um padrão certo e o usuário escolhe. `of` e `to`: o nome com artigo. */
+const AI_INFO: Record<AiProviderId, { label: string; of: string; to: string; model: string; modelHint: string; keyHint: string }> = {
+  anthropic: { label: 'Anthropic', of: 'da Anthropic', to: 'à Anthropic', model: 'claude-opus-5-5', modelHint: 'claude-opus-5-5', keyHint: 'sk-ant-…' },
+  openai: { label: 'OpenAI', of: 'da OpenAI', to: 'à OpenAI', model: '', modelHint: 'ex.: gpt-4o-mini', keyHint: 'sk-…' },
+  openrouter: { label: 'OpenRouter', of: 'do OpenRouter', to: 'ao OpenRouter', model: '', modelHint: 'ex.: openai/gpt-4o-mini', keyHint: 'sk-or-v1-…' },
+};
 
 export default function SettingsScreen() {
   const t = useTheme();
@@ -33,6 +41,59 @@ export default function SettingsScreen() {
   // Só a consulta mais recente vale, e só para o servidor e a identidade em que começou:
   // a resposta de um servidor anterior ou do usuário antigo não substitui a lista atual.
   const devicesGen = useRef(0);
+  // IA: `aiProvider` null é a IA do servidor. A chave digitada só vive neste estado até salvar; a salva nunca volta à tela.
+  const [aiProvider, setAiProvider] = useState<AiProviderId | null>(s.ai?.provider ?? null);
+  const [aiModel, setAiModel] = useState(s.ai?.model ?? '');
+  const [aiKeyDraft, setAiKeyDraft] = useState('');
+  const [aiKeySaved, setAiKeySaved] = useState(false);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiMsg, setAiMsg] = useState<string | null>(null);
+  // Provedores que o servidor aceita com chave própria; null antes do teste de conexão.
+  const [serverByok, setServerByok] = useState<string[] | null>(null);
+  // A chave salva só vale para o provedor em que foi salva.
+  const keyKept = aiKeySaved && aiProvider !== null && s.ai?.provider === aiProvider;
+
+  const pickAiProvider = (p: AiProviderId | null) => {
+    setAiProvider(p);
+    setAiModel(p && p === s.ai?.provider ? s.ai.model : p ? AI_INFO[p].model : '');
+    setAiKeyDraft('');
+    setAiMsg(null);
+  };
+
+  const saveAiChoice = async () => {
+    setAiBusy(true);
+    try {
+      if (!aiProvider) {
+        await clearAi();
+        setAiKeySaved(false);
+        setAiMsg('O copiloto usa a IA do servidor. A chave saiu deste aparelho.');
+      } else {
+        const typed = aiKeyDraft.trim();
+        if (!typed && !keyKept) throw new Error(`Cole a chave ${AI_INFO[aiProvider].of}.`);
+        await saveAi({ provider: aiProvider, model: aiModel }, typed || null);
+        setAiKeyDraft('');
+        setAiKeySaved(true);
+        setAiMsg(`Chave salva neste aparelho. O copiloto usa ${AI_INFO[aiProvider].label} (${aiModel.trim()}).`);
+      }
+    } catch (e) {
+      setAiMsg(e instanceof Error ? e.message : 'Não foi possível salvar.');
+    }
+    setAiBusy(false);
+  };
+
+  const removeAiKey = async () => {
+    setAiBusy(true);
+    try {
+      await clearAi();
+      setAiKeySaved(false);
+      setAiProvider(null);
+      setAiModel('');
+      setAiMsg('Chave removida deste aparelho. O copiloto usa a IA do servidor.');
+    } catch {
+      setAiMsg('Não foi possível apagar a chave deste aparelho. Tente de novo.');
+    }
+    setAiBusy(false);
+  };
   const identity = () => `${normalizeApiUrl(useSettings.getState().apiUrl)} ${useSettings.getState().userId}`;
 
   const loadDevices = async () => {
@@ -139,6 +200,7 @@ export default function SettingsScreen() {
     setStatus('Testando…');
     try {
       const h = await api.health();
+      setServerByok(h.byok ?? []);
       const ai = h.ai ? `IA: ${h.ai.provider} (${h.ai.model}).` : 'IA desativada: o copiloto usa regras.';
       setStatus(`Conectado. ${ai} ${h.map ? 'Mapa do próprio servidor.' : 'Mapa público (OpenFreeMap).'}`);
       void loadPrivacy();
@@ -149,6 +211,9 @@ export default function SettingsScreen() {
   };
 
   useEffect(() => {
+    hasAiKey()
+      .then(setAiKeySaved)
+      .catch(() => setAiKeySaved(false));
     void test();
     // Testa a conexão uma vez ao abrir.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -191,6 +256,64 @@ export default function SettingsScreen() {
         />
         <Button label="Salvar e testar" kind="secondary" icon="lan-connect" onPress={() => void test()} />
         {status ? <T variant="caption">{status}</T> : null}
+      </Card>
+
+      <Card style={{ gap: 10 }}>
+        <T variant="title">IA do copiloto</T>
+        <View style={styles.chips}>
+          <Chip label="Do servidor" selected={aiProvider === null} onPress={() => pickAiProvider(null)} />
+          {AI_PROVIDERS.map((p) => (
+            <Chip key={p} label={AI_INFO[p].label} selected={aiProvider === p} onPress={() => pickAiProvider(p)} />
+          ))}
+        </View>
+        {aiProvider ? (
+          <>
+            <TextInput
+              value={aiModel}
+              onChangeText={setAiModel}
+              placeholder={AI_INFO[aiProvider].modelHint}
+              placeholderTextColor={t.textMuted}
+              autoCapitalize="none"
+              autoCorrect={false}
+              style={[styles.input, { color: t.text, borderColor: t.border, backgroundColor: t.surfaceAlt }]}
+              accessibilityLabel="Modelo de IA"
+            />
+            <TextInput
+              value={aiKeyDraft}
+              onChangeText={setAiKeyDraft}
+              placeholder={keyKept ? 'Chave salva. Cole outra para trocar.' : `Chave (${AI_INFO[aiProvider].keyHint})`}
+              placeholderTextColor={t.textMuted}
+              secureTextEntry
+              autoCapitalize="none"
+              autoCorrect={false}
+              autoComplete="off"
+              importantForAutofill="no"
+              style={[styles.input, { color: t.text, borderColor: t.border, backgroundColor: t.surfaceAlt }]}
+              accessibilityLabel="Chave de IA"
+            />
+            <T variant="caption">
+              A chave fica só neste aparelho. O app a manda ao servidor acima, por HTTPS, apenas nas chamadas de IA. O servidor a repassa{' '}
+              {AI_INFO[aiProvider].to} e não a guarda nem registra em log.
+            </T>
+            {aiKeyInBrowser() ? (
+              <T variant="caption" color={t.warning}>
+                No navegador não há cofre de chaves: a chave fica no armazenamento local deste site, e quem usar este navegador consegue lê-la.
+              </T>
+            ) : null}
+            {serverByok && !serverByok.includes(aiProvider) ? (
+              <T variant="caption" color={t.danger}>
+                Este servidor não aceita chave própria {AI_INFO[aiProvider].of}. Atualize a API ou use a IA do servidor.
+              </T>
+            ) : null}
+          </>
+        ) : (
+          <T variant="caption">O copiloto usa a IA configurada no servidor. Sem IA no servidor, ele segue por regras.</T>
+        )}
+        <Button label="Salvar IA" kind="secondary" icon="key-variant" loading={aiBusy} onPress={() => void saveAiChoice()} />
+        {aiKeySaved && s.ai ? (
+          <Button label="Remover chave deste aparelho" kind="danger" icon="key-remove" disabled={aiBusy} onPress={() => void removeAiKey()} />
+        ) : null}
+        {aiMsg ? <T variant="caption">{aiMsg}</T> : null}
       </Card>
 
       <Card style={{ gap: 14 }}>
@@ -303,6 +426,6 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   content: { padding: 16, gap: 14, maxWidth: 640, width: '100%', alignSelf: 'center' },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  chips: { flexDirection: 'row', gap: 8 },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   input: { height: 48, borderWidth: 1, borderRadius: 12, paddingHorizontal: 12, fontSize: 15 },
 });
