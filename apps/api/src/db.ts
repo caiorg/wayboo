@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import {
+  LIVE_WINDOW_MS,
   PRIOR_WEIGHTS,
   segmentOfKey,
+  type LiveObservation,
   type DecayedStat,
   type LatLon,
   type Place,
@@ -340,6 +342,49 @@ export function setShareCrowd(userId: string, share: boolean): void {
     `INSERT INTO privacy (user_id, share_crowd, updated_at) VALUES (?, ?, ?)
      ON CONFLICT(user_id) DO UPDATE SET share_crowd = excluded.share_crowd, updated_at = excluded.updated_at`,
   ).run(userId, share ? 1 : 0, Date.now());
+  // Revogar o opt-in tira também o que o usuário mediu nos últimos minutos.
+  if (!share) db.prepare('DELETE FROM live_obs WHERE user_id = ?').run(userId);
+}
+
+// ---------- trânsito ao vivo ----------
+
+/**
+ * Última medida de cada usuário com opt-in em cada trecho, nos últimos 15 min: o log da razão e o instante
+ * de saída do trecho, no relógio do servidor. O `user_id` só serve para contar usuários distintos e
+ * guardar uma medida por pessoa; nunca sai da API. Linhas com mais de 15 min saem a cada gravação e leitura.
+ */
+db.exec(`
+CREATE TABLE IF NOT EXISTS live_obs (
+  seg TEXT NOT NULL, user_id TEXT NOT NULL, t INTEGER NOT NULL, x REAL NOT NULL,
+  PRIMARY KEY (seg, user_id)
+);
+CREATE INDEX IF NOT EXISTS live_obs_t ON live_obs(t);
+`);
+
+const purgeLive = (now: number) => Number(db.prepare('DELETE FROM live_obs WHERE t < ?').run(now - LIVE_WINDOW_MS).changes);
+
+export function saveLiveObservations(userId: string, observations: { seg: string; t: number; x: number }[], now = Date.now()): void {
+  purgeLive(now);
+  const stmt = db.prepare(
+    `INSERT INTO live_obs (seg, user_id, t, x) VALUES (?, ?, ?, ?)
+     ON CONFLICT(seg, user_id) DO UPDATE SET t = excluded.t, x = excluded.x WHERE excluded.t >= live_obs.t`,
+  );
+  for (const o of observations) stmt.run(o.seg, userId, o.t, o.x);
+}
+
+/** Observações da janela nos trechos pedidos, para `aggregateLive`. */
+export function loadLiveObservations(segs: string[], now = Date.now()): LiveObservation[] {
+  purgeLive(now);
+  const unique = [...new Set(segs)];
+  const out: LiveObservation[] = [];
+  for (let i = 0; i < unique.length; i += 400) {
+    const part = unique.slice(i, i + 400);
+    const rows = db
+      .prepare(`SELECT seg, user_id, t, x FROM live_obs WHERE seg IN (${part.map(() => '?').join(',')})`)
+      .all(...part) as Row[];
+    for (const r of rows) out.push({ seg: String(r.seg), contributor: String(r.user_id), t: Number(r.t), x: Number(r.x) });
+  }
+  return out;
 }
 
 // ---------- planos ----------
@@ -385,8 +430,11 @@ export function insertSamples(tripId: string, samples: TraceSample[], now = Date
   db.prepare('UPDATE trips SET last_sample_at = ? WHERE id = ?').run(now, tripId);
 }
 
-export function getSamples(tripId: string): TraceSample[] {
-  return (db.prepare('SELECT t, lat, lon, speed, heading, accuracy FROM samples WHERE trip_id = ? ORDER BY t').all(tripId) as Row[]).map((r) => ({
+/** Amostras da viagem a partir de `since` (relógio do aparelho), em ordem. */
+export function getSamples(tripId: string, since = -Infinity): TraceSample[] {
+  return (
+    db.prepare('SELECT t, lat, lon, speed, heading, accuracy FROM samples WHERE trip_id = ? AND t >= ? ORDER BY t').all(tripId, since) as Row[]
+  ).map((r) => ({
     t: Number(r.t),
     lat: Number(r.lat),
     lon: Number(r.lon),
@@ -411,7 +459,7 @@ const ABANDONED_TRIP_MS = 86_400_000;
 export function purgeExpiredTraces(
   retentionMs: number,
   now = Date.now(),
-): { samples: number; plans: number; alerts: number; routineRoutes: number } {
+): { samples: number; plans: number; alerts: number; routineRoutes: number; liveObservations: number } {
   const cutoff = now - retentionMs;
   const abandonedCutoff = now - Math.max(retentionMs, ABANDONED_TRIP_MS);
   // Ativa: abandono conta do último envio de amostras pelo relógio do servidor, não da idade da viagem
@@ -426,7 +474,8 @@ export function purgeExpiredTraces(
     db.prepare('DELETE FROM alert_votes WHERE alert_id IN (SELECT id FROM alerts WHERE expires_at < ?)').run(cutoff);
     const alerts = db.prepare('DELETE FROM alerts WHERE expires_at < ?').run(cutoff);
     const routineRoutes = purgeExpiredRoutineRoutes(now);
-    return { samples: Number(samples.changes), plans: Number(plans.changes), alerts: Number(alerts.changes), routineRoutes };
+    const liveObservations = purgeLive(now);
+    return { samples: Number(samples.changes), plans: Number(plans.changes), alerts: Number(alerts.changes), routineRoutes, liveObservations };
   });
 }
 
@@ -450,6 +499,7 @@ const USER_TABLES: { table: string; where: string; columns?: string }[] = [
   { table: 'routine_routes', where: 'user_id = ?' },
   { table: 'prefs', where: 'user_id = ?' },
   { table: 'privacy', where: 'user_id = ?' },
+  { table: 'live_obs', where: 'user_id = ?' },
   { table: 'alerts', where: 'reporter = ?' },
   { table: 'alert_votes', where: 'user_id = ?' },
   { table: 'devices', where: 'user_id = ?', columns: 'id, created_at, last_seen_at, revoked_at' },

@@ -88,6 +88,12 @@ export function pool(stats: { s: DecayedStat | undefined; weight: number }[], no
   return { w, mean, m2: Math.max(0, sumSq - w * mean * mean), t: now };
 }
 
+/** Trechos com tempo base menor que isso não aprendem: a razão fica dominada pelo ruído do GPS. */
+export const MIN_LEARN_BASE_S = 2;
+
+/** Log da razão `observado / base`, limitado para uma medida ruim não dominar a média. */
+export const logRatio = (observedS: number, baseS: number) => Math.max(-1.2, Math.min(2.5, Math.log(observedS / baseS)));
+
 // ---------- tempo local ----------
 
 const formatters = new Map<string, Intl.DateTimeFormat>();

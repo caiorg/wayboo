@@ -90,7 +90,7 @@ export const TraceSampleSchema = z.object({
 export type TraceSample = z.infer<typeof TraceSampleSchema>;
 
 export interface EtaFactor {
-  kind: 'segments' | 'time_of_day' | 'context' | 'routine' | 'alerts' | 'crowd';
+  kind: 'segments' | 'live' | 'time_of_day' | 'context' | 'routine' | 'alerts' | 'crowd';
   label: string;
   /** Delta em segundos em relação ao ETA base do roteador. */
   deltaS: number;
