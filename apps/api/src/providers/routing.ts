@@ -19,10 +19,16 @@ import {
 import { config } from '../config';
 import { fetchJson, HttpError } from './http';
 
+/** Dados opcionais da rota que custam chamadas extras ao roteador. */
+export interface RouteExtras {
+  /** Limites de velocidade por trecho (padrão: sim). Quem só usa a geometria passa `false`. */
+  speedLimits?: boolean;
+}
+
 /** Interface para trocar o roteador (Valhalla público, Valhalla próprio, GraphHopper...). */
 export interface RoutingProvider {
   name: string;
-  route(locations: LatLon[], options: RouteOptions, alternatives: number): Promise<Route[]>;
+  route(locations: LatLon[], options: RouteOptions, alternatives: number, extras?: RouteExtras): Promise<Route[]>;
 }
 
 interface ValhallaManeuver {
@@ -188,7 +194,7 @@ function toRoute(trip: ValhallaTrip, speedLimits: (SpeedLimitSpan[] | undefined)
 
 export const valhalla: RoutingProvider = {
   name: 'valhalla',
-  async route(locations, options, alternatives) {
+  async route(locations, options, alternatives, extras = {}) {
     const body = {
       locations: locations.map((l, i) => ({ lat: l.lat, lon: l.lon, type: i === 0 || i === locations.length - 1 ? 'break' : 'break_through' })),
       costing: 'auto',
@@ -215,9 +221,10 @@ export const valhalla: RoutingProvider = {
         timeoutMs: 20000,
       });
       const trips = [res.trip, ...(res.alternates ?? []).map((a) => a.trip)];
-      const limits = await Promise.all(
-        trips.map((t) => Promise.all(t.legs.map((l) => legSpeedLimits(l.shape)))),
-      );
+      const limits =
+        extras.speedLimits === false
+          ? []
+          : await Promise.all(trips.map((t) => Promise.all(t.legs.map((l) => legSpeedLimits(l.shape)))));
       return trips.map((t, i) => toRoute(t, limits[i]));
     } catch (e) {
       if (e instanceof HttpError && e.status === 400) {

@@ -171,6 +171,12 @@ describe('roteador Valhalla: limite de velocidade', () => {
     expect(r!.speedLimits).toEqual([{ beginIdx: 0, endIdx: 2, kmh: 110 }]);
   });
 
+  it('quem só precisa da geometria pula a consulta de limites', async () => {
+    const [r] = await valhalla.route([{ lat: -23.56, lon: -46.65 }, { lat: -23.56, lon: -46.64 }], OPTIONS, 0, { speedLimits: false });
+    expect(traces).toHaveLength(0);
+    expect(r!.speedLimits).toBeUndefined();
+  });
+
   it('falha no trace_attributes não derruba a rota', async () => {
     traceHandler = () => new Response('falhou', { status: 500 });
     const [r] = await route();
