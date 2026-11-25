@@ -8,7 +8,7 @@ import {
   type ManeuverIcon,
   type NavState,
 } from '@wayboo/core';
-import { StyleSheet, View } from 'react-native';
+import { StyleSheet, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '@/lib/theme';
 import { Card, Chip, Icon, IconButton, T, type IconName } from './ui';
@@ -63,10 +63,23 @@ function laneLabel(l: LaneView, i: number): string {
 /** Acima disso as faixas dividem a largura da tela em vez de ter largura fixa. */
 const COMPACT_LANES = 6;
 
+/**
+ * Tamanho das setas para que todas caibam na faixa: a largura da tela, menos as margens da linha,
+ * dividida entre as faixas e depois entre as setas de cada uma. Nunca passa do tamanho normal.
+ */
+function laneIconSize(screenWidth: number, laneCount: number, arrows: number, compact: boolean): number {
+  const gap = compact ? 2 : 4;
+  const row = screenWidth - 2 * 12 - 2 * 6 - gap * (laneCount - 1);
+  const inner = row / laneCount - 2 * (compact ? 1 : 4) - 2 * 2;
+  // Sem piso: num caso extremo as setas ficam pequenas, mas nunca cortadas.
+  return Math.max(1, Math.min(arrows > 1 ? 18 : 22, Math.floor(inner / arrows)));
+}
+
 /** Faixas da próxima manobra. A faixa recomendada fica clara; as que também servem ficam contornadas. */
 function LaneStrip({ lanes, background }: { lanes: LaneView[]; background: string }) {
   // Com muitas faixas, 38 pt por faixa passam da largura do celular: elas dividem a linha e as setas encolhem.
   const compact = lanes.length > COMPACT_LANES;
+  const { width } = useWindowDimensions();
   // Sem recomendação do roteador, todas as setas ficam claras; com ela, apagam as que não seguem a rota.
   const guided = lanes.some((l) => l.state !== 'other');
   const arrowColor = (l: LaneView, d: LaneIndication) => {
@@ -92,7 +105,7 @@ function LaneStrip({ lanes, background }: { lanes: LaneView[]; background: strin
         >
           {l.indications.length ? (
             l.indications.map((d) => (
-              <Icon key={d} name={LANE_ICON[d]} size={(l.indications.length > 1 ? 18 : 22) - (compact ? 5 : 0)} color={arrowColor(l, d)} />
+              <Icon key={d} name={LANE_ICON[d]} size={laneIconSize(width, lanes.length, l.indications.length, compact)} color={arrowColor(l, d)} />
             ))
           ) : (
             <View style={styles.laneBlank} />
