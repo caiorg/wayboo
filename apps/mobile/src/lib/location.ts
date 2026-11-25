@@ -13,6 +13,38 @@ interface LocationState {
 export const useLocationStore = create<LocationState>(() => ({ fix: null, permission: 'unknown', error: null }));
 
 let subscription: Location.LocationSubscription | null = null;
+/** Horário da última leitura real publicada. Não usa o fix do store, que a simulação adianta. */
+let lastPublishedT = -Infinity;
+/** Leitura repetida chega segundos depois. Uma bem mais antiga indica que o relógio do aparelho voltou. */
+const CLOCK_JUMP_MS = 60_000;
+
+function toFix(p: Location.LocationObject): NavFix {
+  return {
+    t: p.timestamp,
+    lat: p.coords.latitude,
+    lon: p.coords.longitude,
+    speed: p.coords.speed !== null && p.coords.speed >= 0 ? p.coords.speed : null,
+    heading: p.coords.heading !== null && p.coords.heading >= 0 ? p.coords.heading : null,
+    accuracy: p.coords.accuracy,
+  };
+}
+
+/**
+ * Publica as leituras do GPS em ordem de horário, uma por vez, para a navegação processar cada ponto.
+ * Com a navegação em segundo plano, o watcher e a task entregam os mesmos pontos: repetidas e pouco mais antigas são ignoradas.
+ */
+export function publishLocations(locations: readonly Location.LocationObject[]): void {
+  for (const p of [...locations].sort((a, b) => a.timestamp - b.timestamp)) {
+    if (p.timestamp <= lastPublishedT && p.timestamp > lastPublishedT - CLOCK_JUMP_MS) continue;
+    lastPublishedT = p.timestamp;
+    useLocationStore.setState({ fix: toFix(p) });
+  }
+}
+
+/** Só para testes. */
+export function resetPublishedLocations(): void {
+  lastPublishedT = -Infinity;
+}
 
 /** Pede permissão e mantém um único watcher de GPS para o app inteiro. */
 export async function startLocation(): Promise<void> {
@@ -26,18 +58,7 @@ export async function startLocation(): Promise<void> {
     useLocationStore.setState({ permission: 'granted', error: null });
     subscription = await Location.watchPositionAsync(
       { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 1000, distanceInterval: 2 },
-      (p) => {
-        useLocationStore.setState({
-          fix: {
-            t: p.timestamp,
-            lat: p.coords.latitude,
-            lon: p.coords.longitude,
-            speed: p.coords.speed !== null && p.coords.speed >= 0 ? p.coords.speed : null,
-            heading: p.coords.heading !== null && p.coords.heading >= 0 ? p.coords.heading : null,
-            accuracy: p.coords.accuracy,
-          },
-        });
-      },
+      (p) => publishLocations([p]),
     );
   } catch (e) {
     useLocationStore.setState({ error: e instanceof Error ? e.message : 'Localização indisponível' });

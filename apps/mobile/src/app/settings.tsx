@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ScrollView, StyleSheet, Switch, TextInput, View } from 'react-native';
 import { Button, Card, Chip, T } from '@/components/ui';
+import { BACKGROUND_LOCATION_SUPPORTED } from '@/lib/backgroundLocation';
 import { api, ApiError, LocalSaveError, RegistrationLimitError, type DeviceInfo } from '@/lib/api';
 import { exportMyData, type ExportResult } from '@/lib/exportData';
 import { normalizeApiUrl, useSettings, type ThemePref } from '@/lib/store';
@@ -195,6 +196,14 @@ export default function SettingsScreen() {
       <Card style={{ gap: 14 }}>
         <T variant="title">Navegação</T>
         {row('Instruções por voz', s.voice, (v) => s.set({ voice: v }))}
+        {BACKGROUND_LOCATION_SUPPORTED
+          ? row(
+              'Continuar com a tela bloqueada',
+              s.backgroundNav,
+              (v) => s.set({ backgroundNav: v }),
+              'Usa o GPS em segundo plano só durante a navegação, e não na simulação. No Android, uma notificação fica visível até o fim da viagem.',
+            )
+          : null}
         {row('Evitar pedágios', s.avoidTolls, (v) => s.set({ avoidTolls: v }), 'O app também aprende isso das suas escolhas.')}
         {row('Evitar rodovias', s.avoidHighways, (v) => s.set({ avoidHighways: v }))}
       </Card>
