@@ -16,9 +16,10 @@ import {
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import * as Speech from 'expo-speech';
 import { create } from 'zustand';
-import { api } from './api';
+import { clearActiveTrip, loadActiveTrip, saveActiveTrip } from './activeTrip';
+import { api, ApiError } from './api';
 import { useLocationStore } from './location';
-import { useSettings } from './store';
+import { normalizeApiUrl, useSettings } from './store';
 
 type Status = 'idle' | 'navigating' | 'arrived';
 
@@ -178,6 +179,29 @@ function speak(text: string) {
   });
 }
 
+const currentApiUrl = () => normalizeApiUrl(useSettings.getState().apiUrl);
+
+/**
+ * Grava a navegação real em curso para retomá-la se o app fechar. A simulação não é gravada.
+ * Só a rota seguida entra no plano gravado, e o rastro só quando há viagem no servidor para recebê-lo.
+ */
+function persistTrip() {
+  const s = useNavSession.getState();
+  if (s.status !== 'navigating' || s.simulated || finishing || !s.plan || !s.route) return;
+  const routeId = s.route.id;
+  const chosen = s.plan.routes.find((r) => r.route.id === routeId);
+  if (!chosen) return;
+  void saveActiveTrip({
+    savedAt: Date.now(),
+    apiUrl: currentApiUrl(),
+    plan: { ...s.plan, routes: [chosen], recommendedIndex: 0 },
+    routeIndex: 0,
+    stops: s.stops,
+    tripId: s.tripId,
+    buffer: s.tripId ? buffer : [],
+  });
+}
+
 async function flush() {
   const { tripId } = useNavSession.getState();
   if (!tripId || buffer.length === 0) return;
@@ -216,9 +240,12 @@ async function reroute(fix: NavFix) {
     const chosen = next.routes[next.recommendedIndex]!;
     navigator = createNavigator(chosen.route, { segmentDurationsS: chosen.eta.segmentDurationsS });
     if (s.tripId) await api.reroute(s.tripId, next.planId, next.recommendedIndex);
-    useNavSession.setState({ route: chosen.route, plan: { ...next, destination: s.plan.destination }, rerouting: false });
+    useNavSession.setState({ route: chosen.route, plan: { ...next, destination: s.plan.destination }, rerouting: false, error: null });
+    persistTrip();
   } catch (e) {
-    useNavSession.setState({ rerouting: false, error: e instanceof Error ? e.message : 'Falha ao recalcular' });
+    // Sem rede o navegador antigo continua valendo: a orientação segue pela rota já calculada.
+    const error = e instanceof ApiError && e.status === 0 ? 'Sem conexão: seguindo a rota anterior.' : e instanceof Error ? e.message : 'Falha ao recalcular';
+    useNavSession.setState({ rerouting: false, error });
   }
 }
 
@@ -228,6 +255,7 @@ function onFix(fix: NavFix) {
   const s = useNavSession.getState();
   const stops = markVisitedStops(s.stops, fix, { alongM: st.alongM, project: navigator.project, lastWithin: navigator.lastWithin });
   useNavSession.setState(stops === s.stops ? { nav: st } : { nav: st, stops });
+  if (stops !== s.stops) persistTrip();
   if (st.announcement) speak(st.announcement);
   if (!s.simulated) buffer.push({ t: fix.t, lat: fix.lat, lon: fix.lon, speed: fix.speed ?? null, heading: fix.heading ?? null, accuracy: fix.accuracy ?? null });
   if (st.arrived) {
@@ -241,6 +269,8 @@ export async function startNavigation(plan: PlanResponse, routeIndex: number, si
   cleanup();
   finishing = false;
   buffer = [];
+  // O intervalo entre recálculos é por navegação: um recálculo da anterior não atrasa o desta.
+  lastRerouteAt = 0;
   const chosen = plan.routes[routeIndex];
   if (!chosen) return;
   // Vozes podem ter sido instaladas desde a última navegação; já começa a buscar para a primeira fala.
@@ -276,14 +306,23 @@ export async function startNavigation(plan: PlanResponse, routeIndex: number, si
     return;
   }
 
+  persistTrip();
   try {
     const { tripId } = await api.startTrip(plan.planId, routeIndex);
     useNavSession.setState({ tripId });
+    persistTrip();
   } catch (e) {
     // Sem servidor a navegação continua; só não haverá aprendizado desta viagem.
     useNavSession.setState({ error: e instanceof Error ? e.message : 'Viagem não registrada' });
   }
-  flushTimer = setInterval(() => void flush(), FLUSH_EVERY_MS);
+  followLocation();
+}
+
+/** Liga a navegação real ao GPS e ao envio periódico do rastro. */
+function followLocation() {
+  flushTimer = setInterval(() => {
+    void flush().then(persistTrip);
+  }, FLUSH_EVERY_MS);
   unsubscribe = useLocationStore.subscribe((state, prev) => {
     if (state.fix && state.fix !== prev.fix) onFix(state.fix);
   });
@@ -291,11 +330,45 @@ export async function startNavigation(plan: PlanResponse, routeIndex: number, si
   if (current) onFix(current);
 }
 
+/**
+ * Retoma a navegação gravada quando o app reabre (o sistema pode tê-lo fechado no meio da viagem, com ou sem rede).
+ * Não chama o servidor: a rota, as paradas visitadas e o rastro pendente vêm do aparelho.
+ */
+export async function resumeNavigation(): Promise<boolean> {
+  if (useNavSession.getState().status !== 'idle') return false;
+  const trip = await loadActiveTrip(currentApiUrl());
+  if (!trip || useNavSession.getState().status !== 'idle') return false;
+  const chosen = trip.plan.routes[trip.routeIndex]!;
+  cleanup();
+  finishing = false;
+  buffer = trip.buffer;
+  lastRerouteAt = 0;
+  voiceByLanguage.clear();
+  void voiceFor(INSTRUCTION_LANGUAGE);
+  navigator = createNavigator(chosen.route, { segmentDurationsS: chosen.eta.segmentDurationsS });
+  useNavSession.setState({
+    status: 'navigating',
+    plan: trip.plan,
+    route: chosen.route,
+    stops: trip.stops,
+    nav: null,
+    tripId: trip.tripId,
+    simulated: false,
+    rerouting: false,
+    result: null,
+    error: null,
+  });
+  acquireKeepAwake();
+  followLocation();
+  return true;
+}
+
 export async function stopNavigation(): Promise<void> {
   if (finishing) return;
   finishing = true;
   const { tripId, simulated, nav } = useNavSession.getState();
   cleanup();
+  void clearActiveTrip();
   if (simulated || !tripId) {
     useNavSession.setState({ status: nav?.arrived ? 'arrived' : 'idle', result: null });
     return;
