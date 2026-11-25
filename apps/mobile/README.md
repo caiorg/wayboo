@@ -59,4 +59,6 @@ cloudflared tunnel --url http://localhost:8787                  # em outro termi
 EXPO_PUBLIC_API_URL=<url do túnel> bunx expo start --tunnel     # em apps/mobile; o QR code passa a apontar para o túnel do Metro
 ```
 
+O túnel rápido do `cloudflared` publica a API local para qualquer pessoa com a URL. Enquanto ele estiver ativo, ela pode registrar um aparelho em `/auth/device` e chamar `/assistant`, o que gera custo se a API tiver chave de um provedor de IA pago. Encerre o `cloudflared` quando o teste terminar.
+
 O app grava a URL da API na primeira abertura. Se a máquina mudar de IP ou de rede, ou se você passar a usar o túnel depois, troque a URL em Ajustes ou apague os dados do app.
