@@ -1,4 +1,5 @@
 import type { IncomingHttpHeaders } from 'node:http';
+import { z } from 'zod';
 import { HttpError } from '../providers/http';
 import { anthropicProvider, openAiCompatibleProvider, OPENROUTER_BASE_URL, openRouterProvider, type LlmProvider } from './providers';
 
@@ -42,7 +43,19 @@ const MODEL = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 
 const AI_HEADERS = ['x-ai-provider', 'x-ai-model', 'x-ai-key'] as const;
 
-const header = (v: string | string[] | undefined) => (Array.isArray(v) ? v.join(', ') : v)?.trim() || undefined;
+/** Cabeçalho repetido chega como lista ou unido por ", ": vira uma string com espaço, que as regex recusam. */
+const headerText = (message: string, re: RegExp) =>
+  z.preprocess((v) => (Array.isArray(v) ? v.join(', ') : v), z.string({ error: message }).trim().regex(re, { error: message }));
+
+/** Mensagens fixas, sem `input`: o 400 nunca repete o valor recebido. A ordem das chaves define qual erro aparece. */
+const ByokHeaders = z.object({
+  'x-ai-provider': z.preprocess(
+    (v) => (typeof v === 'string' ? v.trim() : v),
+    z.enum(BYOK_PROVIDERS, { error: `x-ai-provider inválido (use ${BYOK_PROVIDERS.join(' | ')})` }),
+  ),
+  'x-ai-key': headerText('x-ai-key ausente ou em formato inválido', KEY),
+  'x-ai-model': headerText('x-ai-model ausente ou inválido', MODEL),
+});
 
 /**
  * Lê a chave do usuário dos cabeçalhos. Sem nenhum dos três, `null`: a requisição usa o provedor do servidor.
@@ -51,14 +64,10 @@ const header = (v: string | string[] | undefined) => (Array.isArray(v) ? v.join(
 export function byokOf(headers: IncomingHttpHeaders): Byok | null {
   // Presença, não valor: cabeçalho vazio também é intenção de usar a chave própria e dá 400.
   if (AI_HEADERS.every((h) => headers[h] === undefined)) return null;
-  const provider = header(headers['x-ai-provider']);
-  const model = header(headers['x-ai-model']);
-  const apiKey = header(headers['x-ai-key']);
-  if (!provider || !(BYOK_PROVIDERS as readonly string[]).includes(provider))
-    throw new HttpError(400, `x-ai-provider inválido (use ${BYOK_PROVIDERS.join(' | ')})`);
-  if (!apiKey || !KEY.test(apiKey)) throw new HttpError(400, 'x-ai-key ausente ou em formato inválido');
-  if (!model || !MODEL.test(model)) throw new HttpError(400, 'x-ai-model ausente ou inválido');
-  return { provider: provider as ByokProviderName, model, apiKey };
+  const parsed = ByokHeaders.safeParse(headers);
+  if (!parsed.success) throw new HttpError(400, parsed.error.issues[0]!.message);
+  const { 'x-ai-provider': provider, 'x-ai-model': model, 'x-ai-key': apiKey } = parsed.data;
+  return { provider, model, apiKey };
 }
 
 /** Nomes em `ANTHROPIC_CUSTOM_HEADERS` e `OPENAI_CUSTOM_HEADERS`: os SDKs os somam a todo cliente, mesmo com `apiKey`. */
