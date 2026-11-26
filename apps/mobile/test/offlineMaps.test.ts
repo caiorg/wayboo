@@ -213,6 +213,14 @@ describe('downloadArea', () => {
       message: 'O download anterior ainda não parou. Tente de novo daqui a pouco.',
     });
     expect(OfflineManager.createPack).toHaveBeenCalledTimes(1);
+    // Consulta que falha não confirma que o pacote parou: o bloqueio continua.
+    const realStatus = stuck.status;
+    stuck.status = () => Promise.reject(new Error('módulo nativo indisponível'));
+    await expect(downloadArea({ styles: ['https://s/light'], bounds, meta: meta({ part: 2 }) }, () => {})).resolves.toMatchObject({
+      status: 'error',
+    });
+    expect(OfflineManager.createPack).toHaveBeenCalledTimes(1);
+    stuck.status = realStatus;
     // Quando o pacote preso para (terminou ou foi pausado), o próximo download segue.
     stuck.current = { ...stuck.current!, state: 'complete' };
     const next = downloadArea({ styles: ['https://s/light'], bounds, meta: meta({ part: 2 }) }, () => {});

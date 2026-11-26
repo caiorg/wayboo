@@ -168,8 +168,14 @@ export async function downloadArea(
   onProgress: (p: DownloadProgress) => void,
 ): Promise<DownloadResult> {
   if (runaway) {
-    const s = await statusOf(runaway);
-    if (s?.state === 'active') return { status: 'error', message: 'O download anterior ainda não parou. Tente de novo daqui a pouco.' };
+    // Libera só com confirmação: status `null` (pacote apagado) ou fora de `active`. Consulta que falha mantém o bloqueio.
+    const s = await runaway.status().then(
+      (status) => status ?? null,
+      () => 'unknown' as const,
+    );
+    if (s === 'unknown' || s?.state === 'active') {
+      return { status: 'error', message: 'O download anterior ainda não parou. Tente de novo daqui a pouco.' };
+    }
     runaway = null;
   }
   let bytes = 0;
