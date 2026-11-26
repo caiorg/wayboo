@@ -1,4 +1,4 @@
-# Servidor lento para test/throttle.swift: conta o pico de requisições simultâneas (GET /peak).
+# Servidor lento para test/main.swift: conta o pico de requisições simultâneas (GET /peak).
 import http.server, socketserver, threading, time, sys
 active = 0; peak = 0; lock = threading.Lock()
 class H(http.server.BaseHTTPRequestHandler):

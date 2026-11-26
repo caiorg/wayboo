@@ -1,6 +1,6 @@
 // Teste do limite de requisições no iOS, sem aparelho (macOS com Swift):
 //   python3 test/slow_server.py 18765 &
-//   swiftc -o /tmp/throttle ios/RequestGate.swift ios/ThrottledURLProtocol.swift test/throttle.swift && /tmp/throttle 18765
+//   swiftc -o /tmp/throttle ios/RequestGate.swift ios/ThrottledURLProtocol.swift test/main.swift && /tmp/throttle 18765
 
 import Foundation
 
