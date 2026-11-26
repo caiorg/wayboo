@@ -61,6 +61,8 @@ let unsubscribe: (() => void) | null = null;
 let simTimer: ReturnType<typeof setInterval> | null = null;
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let buffer: TraceSample[] = [];
+/** Lote enviado ao servidor e ainda sem resposta: entra na gravação até a confirmação. */
+let inFlight: TraceSample[] = [];
 let lastRerouteAt = 0;
 let finishing = false;
 let keepAwakeActive = false;
@@ -198,7 +200,8 @@ function persistTrip() {
     routeIndex: 0,
     stops: s.stops,
     tripId: s.tripId,
-    buffer: s.tripId ? buffer : [],
+    // Se o app fechar no meio do envio, a retomada reenvia o lote. Duplicatas têm o mesmo `t` e não mudam a análise.
+    buffer: s.tripId ? [...inFlight, ...buffer] : [],
   });
 }
 
@@ -207,11 +210,14 @@ async function flush() {
   if (!tripId || buffer.length === 0) return;
   const batch = buffer;
   buffer = [];
+  inFlight = batch;
   try {
     await api.samples(tripId, batch);
   } catch {
     // Sem rede: devolve ao buffer para a próxima tentativa (limite para não crescer sem fim).
     buffer = [...batch, ...buffer].slice(-5000);
+  } finally {
+    inFlight = [];
   }
 }
 
@@ -255,9 +261,9 @@ function onFix(fix: NavFix) {
   const s = useNavSession.getState();
   const stops = markVisitedStops(s.stops, fix, { alongM: st.alongM, project: navigator.project, lastWithin: navigator.lastWithin });
   useNavSession.setState(stops === s.stops ? { nav: st } : { nav: st, stops });
-  if (stops !== s.stops) persistTrip();
   if (st.announcement) speak(st.announcement);
   if (!s.simulated) buffer.push({ t: fix.t, lat: fix.lat, lon: fix.lon, speed: fix.speed ?? null, heading: fix.heading ?? null, accuracy: fix.accuracy ?? null });
+  if (stops !== s.stops) persistTrip();
   if (st.arrived) {
     void stopNavigation();
     return;
@@ -269,6 +275,7 @@ export async function startNavigation(plan: PlanResponse, routeIndex: number, si
   cleanup();
   finishing = false;
   buffer = [];
+  inFlight = [];
   // O intervalo entre recálculos é por navegação: um recálculo da anterior não atrasa o desta.
   lastRerouteAt = 0;
   const chosen = plan.routes[routeIndex];
@@ -342,6 +349,7 @@ export async function resumeNavigation(): Promise<boolean> {
   cleanup();
   finishing = false;
   buffer = trip.buffer;
+  inFlight = [];
   lastRerouteAt = 0;
   voiceByLanguage.clear();
   void voiceFor(INSTRUCTION_LANGUAGE);

@@ -2,11 +2,14 @@ import type { PlanResponse } from '@wayboo/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ACTIVE_TRIP_MAX_AGE_MS, clearActiveTrip, loadActiveTrip, saveActiveTrip, type ActiveTrip } from '../src/lib/activeTrip';
 
-const h = vi.hoisted(() => ({ async: new Map<string, string>(), setFails: false }));
+const h = vi.hoisted(() => ({ async: new Map<string, string>(), setFails: false, readGate: null as Promise<void> | null }));
 
 vi.mock('@react-native-async-storage/async-storage', () => ({
   default: {
-    getItem: async (k: string) => h.async.get(k) ?? null,
+    getItem: async (k: string) => {
+      if (h.readGate) await h.readGate;
+      return h.async.get(k) ?? null;
+    },
     setItem: async (k: string, v: string) => {
       if (h.setFails) throw new Error('disco cheio');
       h.async.set(k, v);
@@ -21,7 +24,10 @@ const NOW = 1_800_000_000_000;
 const plan = {
   planId: 'p1',
   waypoints: [],
-  routes: [{ route: { id: 'r0' } }, { route: { id: 'r1' } }],
+  routes: [
+    { route: { id: 'r0' }, eta: { segmentDurationsS: [] }, alerts: [] },
+    { route: { id: 'r1' }, eta: { segmentDurationsS: [] }, alerts: [] },
+  ],
 } as unknown as PlanResponse;
 
 const trip = (patch: Partial<ActiveTrip> = {}): ActiveTrip => ({
@@ -38,6 +44,7 @@ const trip = (patch: Partial<ActiveTrip> = {}): ActiveTrip => ({
 beforeEach(() => {
   h.async.clear();
   h.setFails = false;
+  h.readGate = null;
 });
 
 describe('viagem ativa gravada no aparelho', () => {
@@ -75,6 +82,27 @@ describe('viagem ativa gravada no aparelho', () => {
   it('descarta rota que não existe no plano', async () => {
     await saveActiveTrip(trip({ routeIndex: 5 }));
     expect(await loadActiveTrip('https://api.wayboo.app', NOW)).toBeNull();
+  });
+
+  it('descarta rota sem os campos que a retomada e o mapa usam', async () => {
+    for (const broken of [null, { route: { id: 'r1' }, eta: {}, alerts: [] }, { route: { id: 'r1' }, eta: { segmentDurationsS: [] }, alerts: null }]) {
+      const routes = [plan.routes[0], broken];
+      h.async.set(KEY, JSON.stringify({ v: 1, ...trip({ plan: { ...plan, routes } as unknown as PlanResponse }) }));
+      expect(await loadActiveTrip('https://api.wayboo.app', NOW)).toBeNull();
+      expect(h.async.has(KEY)).toBe(false);
+    }
+  });
+
+  it('gravação feita durante a leitura de um registro inválido não é apagada', async () => {
+    h.async.set(KEY, '{não é json');
+    let open!: () => void;
+    h.readGate = new Promise((r) => (open = r));
+    const loading = loadActiveTrip('https://api.wayboo.app', NOW);
+    const saving = saveActiveTrip(trip());
+    open();
+    expect(await loading).toBeNull();
+    await saving;
+    expect(await loadActiveTrip('https://api.wayboo.app', NOW)).toEqual(trip());
   });
 
   it('apagar depois de gravar vence, mesmo com a gravação ainda pendente', async () => {

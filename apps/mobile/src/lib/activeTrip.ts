@@ -38,6 +38,13 @@ export function clearActiveTrip(): Promise<void> {
   return enqueue(() => AsyncStorage.removeItem(KEY));
 }
 
+/** A retomada usa `route` e `eta.segmentDurationsS`; o mapa percorre `alerts`. */
+function isRouteOption(r: unknown): boolean {
+  if (!r || typeof r !== 'object') return false;
+  const o = r as { route?: { geometry?: unknown }; eta?: { segmentDurationsS?: unknown }; alerts?: unknown };
+  return !!o.route && typeof o.route === 'object' && Array.isArray(o.eta?.segmentDurationsS) && Array.isArray(o.alerts);
+}
+
 function isTrip(x: unknown): x is ActiveTrip & { v: number } {
   if (!x || typeof x !== 'object') return false;
   const t = x as Partial<ActiveTrip> & { v?: unknown };
@@ -47,6 +54,7 @@ function isTrip(x: unknown): x is ActiveTrip & { v: number } {
     typeof t.apiUrl === 'string' &&
     typeof t.routeIndex === 'number' &&
     Array.isArray(t.plan?.routes) &&
+    t.plan.routes.every(isRouteOption) &&
     t.plan.routes[t.routeIndex] !== undefined &&
     Array.isArray(t.stops) &&
     Array.isArray(t.buffer) &&
@@ -56,20 +64,22 @@ function isTrip(x: unknown): x is ActiveTrip & { v: number } {
 
 /** Viagem gravada que ainda dá para retomar em `apiUrl`, ou null. Gravação inválida ou velha é apagada. */
 export async function loadActiveTrip(apiUrl: string, now = Date.now()): Promise<ActiveTrip | null> {
-  await queue;
-  let parsed: unknown;
-  try {
-    const raw = await AsyncStorage.getItem(KEY);
-    if (raw === null) return null;
-    parsed = JSON.parse(raw);
-  } catch {
-    parsed = null;
-  }
-  if (!isTrip(parsed) || now - parsed.savedAt > ACTIVE_TRIP_MAX_AGE_MS) {
-    await clearActiveTrip();
-    return null;
-  }
-  const { v: _v, ...trip } = parsed;
+  // Ler, decidir e apagar numa só vez da fila: uma gravação que chega durante a leitura roda depois e não é apagada.
+  let found: (ActiveTrip & { v: number }) | null = null;
+  await enqueue(async () => {
+    let parsed: unknown;
+    try {
+      const raw = await AsyncStorage.getItem(KEY);
+      if (raw === null) return;
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = null;
+    }
+    if (isTrip(parsed) && now - parsed.savedAt <= ACTIVE_TRIP_MAX_AGE_MS) found = parsed;
+    else await AsyncStorage.removeItem(KEY);
+  });
+  if (!found) return null;
+  const { v: _v, ...trip } = found as ActiveTrip & { v: number };
   // Trocou de servidor: a rota ainda serve para chegar, mas a viagem é de outro servidor.
   return trip.apiUrl === apiUrl ? trip : { ...trip, tripId: null, buffer: [] };
 }
