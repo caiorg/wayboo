@@ -9,6 +9,7 @@ export * from './api';
 export * from './learning/stats';
 export * from './learning/holidays';
 export * from './learning/eta';
+export * from './learning/live';
 export * from './learning/traces';
 export * from './learning/preferences';
 export * from './learning/routine';

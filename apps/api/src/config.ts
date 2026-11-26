@@ -44,6 +44,13 @@ const RetentionEnv = z.object({
 
 const retentionEnv = parseEnv(RetentionEnv);
 
+/** Mínimo de usuários distintos num trecho, nos últimos 15 min, para o trânsito ao vivo valer (k-anonimato). */
+const LiveEnv = z.object({
+  LIVE_TRAFFIC_MIN_USERS: optionalText.transform((v) => (v === undefined ? 3 : Number(v))).pipe(z.number().int().min(2)),
+});
+
+const liveEnv = parseEnv(LiveEnv);
+
 const PROXY_RANGES = ['loopback', 'linklocal', 'uniquelocal'];
 
 /** IP, CIDR (`10.0.0.0/8`) ou faixa nomeada do `proxy-addr` (`uniquelocal` cobre as redes privadas, como a do Docker). */
@@ -131,6 +138,8 @@ export const config = {
   },
   /** Horas que o rastro GPS de uma viagem encerrada fica no servidor. Ver docs/privacidade.md. */
   gpsRetentionHours: retentionEnv.GPS_RETENTION_HOURS,
+  /** Trânsito ao vivo: um trecho só entra no ETA com pelo menos este número de usuários. Ver docs/privacidade.md. */
+  liveTrafficMinUsers: liveEnv.LIVE_TRAFFIC_MIN_USERS,
   /** Registros de aparelho por IP (IPv6 por /64) a cada janela. `max` 0 desliga. */
   authDeviceRateLimit: {
     max: rateLimitEnv.AUTH_DEVICE_RATE_LIMIT,

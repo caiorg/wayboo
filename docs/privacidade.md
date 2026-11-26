@@ -27,12 +27,21 @@ Cada linha de `devices` tem também um id público, a data do registro, o últim
 | `routine_routes` | Rotas sugeridas para cada rotina, com os pontos de origem e destino pedidos | Reaproveitar a rota habitual em `/suggestions` sem chamar o roteador | Vence em `SUGGESTION_ROUTE_MAX_AGE_MIN` (padrão 24 horas) e sai na rodada de limpeza seguinte (a cada hora) ou antes, na próxima consulta de sugestões de qualquer usuário |
 | `prefs` | Pesos aprendidos das escolhas de rota (tempo, distância, pedágio, rodovia, curvas, familiaridade) | Ordenar as rotas sugeridas | Até o usuário apagar |
 | `privacy` | Opt-in do aprendizado coletivo | Decidir se a viagem soma ao agregado | Até o usuário apagar |
+| `live_obs` | Só com o opt-in: a última medida do usuário em cada trecho (chave do trecho, log da razão entre o tempo medido e o do roteador, instante em que saiu do trecho) | Trânsito ao vivo no ETA de todos os usuários | 15 minutos depois do instante da medida. Sai na gravação ou leitura seguinte e na rodada de limpeza. Revogar o opt-in apaga as do usuário na hora |
 | `alerts` | Alertas que o usuário criou (tipo, coordenada, horário) | Mostrar o alerta para a comunidade | Some do mapa ao expirar (30 min a 180 dias, conforme o tipo); a linha e os votos saem `GPS_RETENTION_HOURS` horas depois |
 | `alert_votes` | Voto do usuário em alertas de outros | Impedir voto repetido | Até o usuário apagar |
 
 ## Dados agregados
 
 Com o opt-in de `PUT /privacy` ligado, a viagem soma ao usuário agregado (`user_id = '*'` em `stats`) só a duração relativa de cada trecho, com o tipo de dia e a faixa de 30 minutos. A data vai sem horário. Não vai rastro, lugar nem `user_id`, então essa contribuição não pode ser separada depois e continua no agregado mesmo após o usuário apagar os dados.
+
+## Trânsito ao vivo
+
+Com o opt-in, a cada envio de amostras (a cada 15 s durante a viagem) a API mede os trechos que o usuário terminou nos últimos 15 minutos e grava em `live_obs` só a medida de cada trecho, uma por usuário. Os pontos GPS não entram nessa tabela, mas a chave do trecho é uma sequência de células de cerca de 150 m. Por isso, as linhas de um mesmo usuário formam um trajeto aproximado dos últimos 15 minutos até saírem.
+
+No ETA, um trecho usa essas medidas só se pelo menos `LIVE_TRAFFIC_MIN_USERS` usuários distintos (padrão 3) passaram por ele nos últimos 15 minutos, sem contar quem pede a rota. A medida de quem pede também fica fora da média. Abaixo do mínimo, a medida não afeta a resposta de ninguém. Cada usuário conta uma vez, e o `user_id` só serve para essa contagem. A API nunca o devolve, e a resposta mostra só o tempo previsto e o fator "Trânsito agora", que também vai para o provedor de IA do copiloto, se houver um configurado. Com o mínimo atingido, o ETA usa a média das medidas. O peso de cada uma cai pela metade a cada 5 minutos.
+
+O mínimo conta contas, não pessoas. Quem cria várias contas com opt-in e envia rastros falsos pode completar o mínimo sozinho e inferir a medida de outra pessoa, ou deixar um trecho com ETA mais lento. A API ainda não exige histórico da conta para que ela entre na contagem.
 
 ## O que vai para serviços externos
 

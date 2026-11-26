@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  aggregateLive,
   binLabel,
   choiceProbabilities,
   cumulativeDistances,
@@ -34,7 +35,8 @@ import {
   type WeatherNow,
 } from '@wayboo/core';
 import type { z } from 'zod';
-import { alertsInBox, CROWD, getPlaces, getPrefs, loadStats, savePlan } from '../db';
+import { config } from '../config';
+import { alertsInBox, CROWD, getPlaces, getPrefs, loadLiveObservations, loadStats, savePlan } from '../db';
 import { currentWeather, weatherFlags } from '../providers/geo-services';
 import { HttpError } from '../providers/http';
 import { valhalla } from '../providers/routing';
@@ -208,6 +210,10 @@ export function evaluatePlan(
   const segKeys = routes.flatMap((r) => r.segments.map((s) => s.key));
   const user = loadStats(userId, segKeys);
   const crowd = loadStats(CROWD, segKeys);
+  // Trânsito dos últimos 15 min; no ETA perde efeito para saídas e trechos mais distantes de agora.
+  const now = Date.now();
+  // Sem a medida de quem pede, que não conta para o mínimo de usuários.
+  const live = { segments: aggregateLive(loadLiveObservations(segKeys, now), now, config.liveTrafficMinUsers, userId), at: now };
   const places = getPlaces(userId);
   const originPlace = matchPlace(places, req.origin.lat, req.origin.lon);
   const destinationPlace = matchPlace(places, req.destination.lat, req.destination.lon);
@@ -223,7 +229,7 @@ export function evaluatePlan(
     const onRoute = alertsOnRoute(route, alerts);
     const ctx = { ...baseCtx, alertsOnRoute: onRoute.length };
     const alertPenaltyS = onRoute.reduce((a, x) => a + ALERT_PENALTY_S[x.type], 0);
-    const eta = predictEta({ route, departAt, timeZone: req.timeZone, user, crowd, ctx, odKey, alertPenaltyS, calendar });
+    const eta = predictEta({ route, departAt, timeZone: req.timeZone, user, crowd, ctx, odKey, alertPenaltyS, calendar, live });
     return { route, eta, alerts: onRoute, familiarity: familiarity(route, user), ctx, alertPenaltyS };
   });
 
@@ -250,7 +256,7 @@ export function evaluatePlan(
   const departures = req.reroute
     ? []
     : departureOptions(
-        { route: rec.route, timeZone: req.timeZone, user, crowd, ctx: rec.ctx, odKey, alertPenaltyS: rec.alertPenaltyS, calendar },
+        { route: rec.route, timeZone: req.timeZone, user, crowd, ctx: rec.ctx, odKey, alertPenaltyS: rec.alertPenaltyS, calendar, live },
         departAt,
         [0, 10, 20, 30, 45, 60, 90],
       );

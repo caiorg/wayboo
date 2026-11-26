@@ -84,6 +84,7 @@ O serviço `api` lê o `.env` (`env_file`). Todas as variáveis da API são opci
 | Variável | Padrão | Efeito |
 | --- | --- | --- |
 | `GPS_RETENTION_HOURS` | `24` | Horas que o servidor guarda o rastro GPS, os planos e os alertas expirados. Com `0`, a próxima rodada de limpeza, que roda ao subir a API e a cada hora, apaga o rastro das viagens encerradas. O rastro de uma viagem ativa fica enquanto ela enviar amostras e só sai depois de mais de 24 horas sem envio. Valor não numérico ou negativo impede a API de subir. O que cada tabela guarda está em [`docs/privacidade.md`](privacidade.md). |
+| `LIVE_TRAFFIC_MIN_USERS` | `3` | Mínimo de usuários distintos com opt-in que passaram por um trecho nos últimos 15 minutos para o trânsito ao vivo desse trecho entrar no ETA. Inteiro a partir de `2`; outro valor impede a API de subir. |
 | `AI_PROVIDER` | detectado pela chave | `anthropic`, `openai`, `ollama`, `openrouter` ou `none`. Sem valor, a API usa o provedor da chave presente (`ANTHROPIC_API_KEY` ou `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, nessa ordem) e, sem chave, desliga a IA. |
 | `AI_MODEL` | `claude-opus-5-5` com `anthropic` | Obrigatório com `openai`, `ollama` e `openrouter`. |
 | `AI_BASE_URL` | `http://localhost:11434/v1` com `ollama`, `https://openrouter.ai/api/v1` com `openrouter` | Dentro do contêiner, `localhost` é o próprio contêiner. Para um Ollama na máquina, use `http://host.docker.internal:11434/v1` (ver [Ollama na mesma máquina](#ollama-na-mesma-máquina)). |
