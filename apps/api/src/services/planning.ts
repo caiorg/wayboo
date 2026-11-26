@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  aggregateLive,
   binLabel,
   choiceProbabilities,
   cumulativeDistances,
@@ -34,7 +35,8 @@ import {
   type WeatherNow,
 } from '@wayboo/core';
 import type { z } from 'zod';
-import { alertsInBox, CROWD, deletionTicket, getPlaces, getPrefs, loadStats, savePlan } from '../db';
+import { config } from '../config';
+import { alertsInBox, CROWD, getPlaces, getPrefs, loadLiveObservations, loadStats, savePlan } from '../db';
 import { currentWeather, weatherFlags } from '../providers/geo-services';
 import { HttpError } from '../providers/http';
 import { valhalla } from '../providers/routing';
@@ -181,24 +183,17 @@ export interface PlanInternals {
   places: Place[];
 }
 
-/** `ticket` vem de `deletionTicket()` no início do pedido; o padrão serve quando `plan` é a primeira espera. */
-export async function plan(
-  userId: string,
-  req: z.output<typeof PlanRequestSchema>,
-  priority: Priority = null,
-  ticket = deletionTicket(),
-): Promise<PlanResponse> {
+export async function plan(userId: string, req: z.output<typeof PlanRequestSchema>, priority: Priority = null): Promise<PlanResponse> {
   const [routes, weather, region] = await Promise.all([
     valhalla.route([req.origin, ...req.waypoints, req.destination], req.options, req.reroute ? 1 : 2),
     currentWeather(req.origin.lat, req.origin.lon),
     regionAt(req.origin, req.timeZone),
   ]);
-  return evaluatePlan(userId, req, routes, weather, priority, ticket, region);
+  return evaluatePlan(userId, req, routes, weather, priority, region);
 }
 
 /**
  * Avalia rotas já obtidas com o que foi aprendido (separado para testes e simulação sem rede).
- * `ticket` vem de `deletionTicket()` no início do pedido, antes de esperar os provedores.
  * `region` (de `regionAt`) acrescenta os feriados estaduais e municipais; null usa só o calendário do fuso.
  */
 export function evaluatePlan(
@@ -207,7 +202,6 @@ export function evaluatePlan(
   routes: Route[],
   weather: WeatherNow | null,
   priority: Priority = null,
-  ticket = deletionTicket(),
   region: HolidayRegion | null = null,
 ): PlanResponse {
   const departAt = req.departAt ?? Date.now();
@@ -216,6 +210,10 @@ export function evaluatePlan(
   const segKeys = routes.flatMap((r) => r.segments.map((s) => s.key));
   const user = loadStats(userId, segKeys);
   const crowd = loadStats(CROWD, segKeys);
+  // Trânsito dos últimos 15 min; no ETA perde efeito para saídas e trechos mais distantes de agora.
+  const now = Date.now();
+  // Sem a medida de quem pede, que não conta para o mínimo de usuários.
+  const live = { segments: aggregateLive(loadLiveObservations(segKeys, now), now, config.liveTrafficMinUsers, userId), at: now };
   const places = getPlaces(userId);
   const originPlace = matchPlace(places, req.origin.lat, req.origin.lon);
   const destinationPlace = matchPlace(places, req.destination.lat, req.destination.lon);
@@ -231,7 +229,7 @@ export function evaluatePlan(
     const onRoute = alertsOnRoute(route, alerts);
     const ctx = { ...baseCtx, alertsOnRoute: onRoute.length };
     const alertPenaltyS = onRoute.reduce((a, x) => a + ALERT_PENALTY_S[x.type], 0);
-    const eta = predictEta({ route, departAt, timeZone: req.timeZone, user, crowd, ctx, odKey, alertPenaltyS, calendar });
+    const eta = predictEta({ route, departAt, timeZone: req.timeZone, user, crowd, ctx, odKey, alertPenaltyS, calendar, live });
     return { route, eta, alerts: onRoute, familiarity: familiarity(route, user), ctx, alertPenaltyS };
   });
 
@@ -258,7 +256,7 @@ export function evaluatePlan(
   const departures = req.reroute
     ? []
     : departureOptions(
-        { route: rec.route, timeZone: req.timeZone, user, crowd, ctx: rec.ctx, odKey, alertPenaltyS: rec.alertPenaltyS, calendar },
+        { route: rec.route, timeZone: req.timeZone, user, crowd, ctx: rec.ctx, odKey, alertPenaltyS: rec.alertPenaltyS, calendar, live },
         departAt,
         [0, 10, 20, 30, 45, 60, 90],
       );
@@ -283,6 +281,6 @@ export function evaluatePlan(
     holidayRegion: region,
   };
   // Usuário apagado durante o planejamento. 409, não 401: com 401 o app registraria o aparelho e repetiria o pedido.
-  if (!savePlan(userId, result, ticket)) throw new HttpError(409, 'Dados do usuário apagados durante o planejamento');
+  if (!savePlan(userId, result)) throw new HttpError(409, 'Dados do usuário apagados durante o planejamento');
   return result;
 }

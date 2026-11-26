@@ -27,12 +27,29 @@ Cada linha de `devices` tem também um id público, a data do registro, o últim
 | `routine_routes` | Rotas sugeridas para cada rotina, com os pontos de origem e destino pedidos | Reaproveitar a rota habitual em `/suggestions` sem chamar o roteador | Vence em `SUGGESTION_ROUTE_MAX_AGE_MIN` (padrão 24 horas) e sai na rodada de limpeza seguinte (a cada hora) ou antes, na próxima consulta de sugestões de qualquer usuário |
 | `prefs` | Pesos aprendidos das escolhas de rota (tempo, distância, pedágio, rodovia, curvas, familiaridade) | Ordenar as rotas sugeridas | Até o usuário apagar |
 | `privacy` | Opt-in do aprendizado coletivo | Decidir se a viagem soma ao agregado | Até o usuário apagar |
+| `live_obs` | Só com o opt-in: a última medida do usuário em cada trecho (chave do trecho, log da razão entre o tempo medido e o do roteador, instante em que saiu do trecho) | Trânsito ao vivo no ETA de todos os usuários | 15 minutos depois do instante da medida. Sai na gravação ou leitura seguinte e na rodada de limpeza. Revogar o opt-in apaga as do usuário na hora |
 | `alerts` | Alertas que o usuário criou (tipo, coordenada, horário) | Mostrar o alerta para a comunidade | Some do mapa ao expirar (30 min a 180 dias, conforme o tipo); a linha e os votos saem `GPS_RETENTION_HOURS` horas depois |
 | `alert_votes` | Voto do usuário em alertas de outros | Impedir voto repetido | Até o usuário apagar |
+
+## Localização com a tela bloqueada
+
+No Android e no iOS, a navegação real continua com a tela bloqueada. A chave fica em Ajustes > Navegação > "Continuar com a tela bloqueada" e vem ligada. O app usa só a permissão de localização "ao usar o app" e não pede acesso "sempre".
+
+- O GPS em segundo plano começa ao iniciar a navegação e para ao chegar, ao encerrar ou ao fechar o app. A simulação não o usa. Na abertura, o app desliga o que uma sessão encerrada no meio da viagem tenha deixado ligado.
+- No Android, uma notificação fica visível até o fim da viagem com o título "Navegando para <destino>", que aparece também na tela bloqueada. No iOS, o sistema mostra o indicador azul de localização na barra de status.
+- Os pontos recebidos com a tela bloqueada entram no mesmo rastro de `samples`, com o mesmo prazo. Nada é gravado fora de uma navegação.
 
 ## Dados agregados
 
 Com o opt-in de `PUT /privacy` ligado, a viagem soma ao usuário agregado (`user_id = '*'` em `stats`) só a duração relativa de cada trecho, com o tipo de dia e a faixa de 30 minutos. A data vai sem horário. Não vai rastro, lugar nem `user_id`, então essa contribuição não pode ser separada depois e continua no agregado mesmo após o usuário apagar os dados.
+
+## Trânsito ao vivo
+
+Com o opt-in, a cada envio de amostras (a cada 15 s durante a viagem) a API mede os trechos que o usuário terminou nos últimos 15 minutos e grava em `live_obs` só a medida de cada trecho, uma por usuário. Os pontos GPS não entram nessa tabela, mas a chave do trecho é uma sequência de células de cerca de 150 m. Por isso, as linhas de um mesmo usuário formam um trajeto aproximado dos últimos 15 minutos até saírem.
+
+No ETA, um trecho usa essas medidas só se pelo menos `LIVE_TRAFFIC_MIN_USERS` usuários distintos (padrão 3) passaram por ele nos últimos 15 minutos, sem contar quem pede a rota. A medida de quem pede também fica fora da média. Abaixo do mínimo, a medida não afeta a resposta de ninguém. Cada usuário conta uma vez, e o `user_id` só serve para essa contagem. A API nunca o devolve, e a resposta mostra só o tempo previsto e o fator "Trânsito agora", que também vai para o provedor de IA do copiloto, se houver um configurado. Com o mínimo atingido, o ETA usa a média das medidas. O peso de cada uma cai pela metade a cada 5 minutos.
+
+O mínimo conta contas, não pessoas. Quem cria várias contas com opt-in e envia rastros falsos pode completar o mínimo sozinho e inferir a medida de outra pessoa, ou deixar um trecho com ETA mais lento. A API ainda não exige histórico da conta para que ela entre na contagem.
 
 ## O que vai para serviços externos
 
@@ -47,10 +64,21 @@ Ao planejar uma rota, a API manda dados de localização a serviços de terceiro
 
 Nenhum desses envios pede consentimento separado no app. A decisão de exigir opt-in para eles está em aberto.
 
+## Chave de IA do usuário (BYOK)
+
+O usuário pode usar a própria chave da Anthropic, da OpenAI ou do OpenRouter em vez do provedor do servidor.
+
+- A chave vai por requisição, só nas chamadas de IA (`POST /plan/:id/brief`, `POST /assistant`, `POST /insights/narrative`), nos cabeçalhos `x-ai-provider`, `x-ai-model` e `x-ai-key`. Sem nenhum deles, vale o provedor do servidor. Com algum ausente, vazio ou inválido, a API responde 400 sem repetir os valores.
+- A API cria o cliente do provedor na requisição e descarta a chave ao responder. Ela não grava a chave em banco, e por isso a chave não aparece em `GET /me/export`.
+- O log não registra cabeçalhos, e o `redact` do logger cobre `x-ai-key` e `authorization`. Quando o provedor falha, o log leva só a classe do erro e o status HTTP, porque a mensagem da OpenAI ecoa parte da chave.
+- Chave recusada (401), sem permissão (403), sem crédito (402) ou modelo inexistente (404) viram um 422 com mensagem da própria API, sem o texto do provedor. Outras falhas caem nas regras, como sem IA, e nunca na chave do servidor.
+- A chave só vai para o endpoint oficial de cada provedor (`api.anthropic.com`, `api.openai.com`, `openrouter.ai`) e não segue redirecionamento (`redirect: 'error'`). Nessas chamadas, a API ignora `AI_BASE_URL`, `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID` e as credenciais do servidor, e tira os cabeçalhos de `ANTHROPIC_CUSTOM_HEADERS` e `OPENAI_CUSTOM_HEADERS`. O log dos SDKs fica desligado, mesmo com `ANTHROPIC_LOG` ou `OPENAI_LOG` em `debug`.
+- Cada usuário faz até 20 chamadas com a própria chave por minuto, e cada IP (IPv6 por /64) até 60. Sem esse limite, a API serviria para testar chaves alheias.
+
 ## Direitos do titular (LGPD, art. 18)
 
 - `GET /me/export` devolve em JSON todas as linhas das tabelas acima ligadas ao usuário autenticado e os aparelhos (id, registro, último uso e revogação), sem o hash do token.
-- `DELETE /me` apaga todas essas linhas, inclusive o registro do aparelho, e o token deixa de valer. Alertas criados pelo usuário continuam visíveis para a comunidade até expirar, mas sem autor (`reporter = '*'`). A contagem de votos dos alertas de outras pessoas não muda. O `user_id` apagado fica em `deleted_users`, só o id e sem data, para que `POST /auth/device` não o adote de novo como `legacyUserId`. Assim, um aparelho restaurado de backup recebe outro id. Esse registro não tem prazo, porque um backup do app pode voltar a qualquer momento. Ele também não entra em `GET /me/export`, porque não há mais token que dê acesso a esse id.
+- `DELETE /me` apaga todas essas linhas, inclusive o registro do aparelho, e o token deixa de valer. Alertas criados pelo usuário continuam visíveis para a comunidade até expirar, mas sem autor (`reporter = '*'`). A contagem de votos dos alertas de outras pessoas não muda. O `user_id` apagado fica em `deleted_users`, só o id e sem data, para que `POST /auth/device` não o adote de novo como `legacyUserId`. Assim, um aparelho restaurado de backup recebe outro id. Pelo mesmo registro, um plano ou rota de rotina de um pedido que começou antes da exclusão não é gravado, mesmo depois de reiniciar o servidor. Esse registro não tem prazo, porque um backup do app pode voltar a qualquer momento. Ele também não entra em `GET /me/export`, porque não há mais token que dê acesso a esse id.
 - No app, Ajustes > Privacidade tem os botões para exportar e para apagar os dados. A exportação baixa o JSON na web e, no Android e no iOS, abre a folha de compartilhamento do sistema.
 
 ## Configuração

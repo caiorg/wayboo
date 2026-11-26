@@ -4,6 +4,7 @@ import {
   decodePolyline,
   INSTRUCTION_LANGUAGE,
   instructionPtBR,
+  parseValhallaLanes,
   type Coord,
   type LatLon,
   type Maneuver,
@@ -30,6 +31,8 @@ interface ValhallaManeuver {
   roundabout_exit_count?: number;
   toll?: boolean;
   highway?: boolean;
+  /** Só vem com `turn_lanes: true`, e só quando a via antes da manobra tem mais de uma faixa. */
+  lanes?: unknown;
 }
 
 interface ValhallaTrip {
@@ -58,6 +61,7 @@ function toRoute(trip: ValhallaTrip): Route {
       const type = resumesAfterStop ? 8 : m.type;
       const streets = m.street_names ?? m.begin_street_names ?? [];
       const text = instructionPtBR(type, streets, m.roundabout_exit_count);
+      const lanes = parseValhallaLanes(m.lanes);
       maneuvers.push({
         type,
         instruction: resumesAfterStop ? `Parada concluída. ${text}` : text,
@@ -69,6 +73,7 @@ function toRoute(trip: ValhallaTrip): Route {
         roundaboutExit: m.roundabout_exit_count,
         toll: Boolean(m.toll),
         highway: Boolean(m.highway),
+        ...(lanes ? { lanes } : {}),
       });
     }
   });
@@ -107,6 +112,8 @@ export const valhalla: RoutingProvider = {
       language: INSTRUCTION_LANGUAGE,
       units: 'kilometers',
       directions_type: 'maneuvers',
+      // Faixas por manobra (Valhalla 3.6.0 ou mais novo).
+      turn_lanes: true,
     };
     try {
       const res = await fetchJson<ValhallaResponse>(`${config.valhallaUrl}/route`, {

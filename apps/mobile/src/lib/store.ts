@@ -183,6 +183,8 @@ interface Settings {
   /** Salvo para o mapa do servidor próprio abrir já no próximo início, sem passar pelo OpenFreeMap. */
   serverMap: ServerMap | null;
   voice: boolean;
+  /** Seguir navegando com a tela bloqueada: GPS em segundo plano só durante a navegação real. */
+  backgroundNav: boolean;
   theme: ThemePref;
   avoidTolls: boolean;
   avoidHighways: boolean;
@@ -206,6 +208,7 @@ export const useSettings = create<Settings>()(
       apiUrl: defaultApiUrl(),
       serverMap: null,
       voice: true,
+      backgroundNav: true,
       theme: 'system',
       avoidTolls: false,
       avoidHighways: false,
