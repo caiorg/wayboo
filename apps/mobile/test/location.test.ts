@@ -78,6 +78,33 @@ describe('publishLocations', () => {
     expect(useLocationStore.getState().fix?.t).toBe(1000);
   });
 
+  it('depois da volta do relógio, um lote atrasado com pontos de antes dela não bloqueia as leituras atuais', () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000_000);
+    const seen: number[] = [];
+    const unsub = useLocationStore.subscribe((st) => {
+      if (st.fix) seen.push(st.fix.t);
+    });
+    publishLocations([loc(9_999_000)]);
+    publishLocations([loc(10_000_000)]);
+    now.mockReturnValue(1000);
+    publishLocations([loc(10_000_000), loc(1000)]);
+    publishLocations([loc(9_999_000), loc(10_000_000)]);
+    now.mockReturnValue(2000);
+    publishLocations([loc(2000)]);
+    unsub();
+    now.mockRestore();
+    expect(seen).toEqual([9_999_000, 10_000_000, 1000, 2000]);
+  });
+
+  it('depois da volta do relógio, aceita leituras com horário posterior ao da última publicada (horário do GPS no Android)', () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000_000);
+    publishLocations([loc(10_000_000)]);
+    now.mockReturnValue(1000);
+    publishLocations([loc(10_001_000)]);
+    now.mockRestore();
+    expect(useLocationStore.getState().fix?.t).toBe(10_001_000);
+  });
+
   it('lote vazio não muda nada', () => {
     publishLocations([]);
     expect(useLocationStore.getState().fix).toBeNull();

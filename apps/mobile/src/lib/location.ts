@@ -17,6 +17,8 @@ let subscription: Location.LocationSubscription | null = null;
 let lastPublishedT = -Infinity;
 /** Relógio do aparelho na última publicação. Se ele voltar mais que CLOCK_JUMP_MS, os horários do GPS recomeçam. */
 let lastPublishedAt = -Infinity;
+/** Horário da última leitura publicada antes de uma volta do relógio. */
+let staleUpTo = -Infinity;
 const CLOCK_JUMP_MS = 60_000;
 
 function toFix(p: Location.LocationObject): NavFix {
@@ -34,12 +36,17 @@ function toFix(p: Location.LocationObject): NavFix {
  * Publica as leituras do GPS em ordem de horário, uma por vez, para a navegação processar cada ponto.
  * Com a navegação em segundo plano, o watcher e a task entregam os mesmos pontos, às vezes num lote atrasado: repetidas e
  * mais antigas são ignoradas. A volta do relógio se detecta pelo relógio do aparelho, não pela diferença entre leituras.
+ * Depois dela, um ponto de antes da volta fica no futuro do relógio novo e já foi publicado: é ignorado.
  */
 export function publishLocations(locations: readonly Location.LocationObject[]): void {
   const now = Date.now();
-  if (now < lastPublishedAt - CLOCK_JUMP_MS) lastPublishedT = -Infinity;
+  if (now < lastPublishedAt - CLOCK_JUMP_MS) {
+    staleUpTo = Math.max(staleUpTo, lastPublishedT);
+    lastPublishedT = -Infinity;
+  }
   for (const p of [...locations].sort((a, b) => a.timestamp - b.timestamp)) {
     if (p.timestamp <= lastPublishedT) continue;
+    if (p.timestamp <= staleUpTo && p.timestamp > now + CLOCK_JUMP_MS) continue;
     lastPublishedT = p.timestamp;
     lastPublishedAt = now;
     useLocationStore.setState({ fix: toFix(p) });
@@ -50,6 +57,7 @@ export function publishLocations(locations: readonly Location.LocationObject[]):
 export function resetPublishedLocations(): void {
   lastPublishedT = -Infinity;
   lastPublishedAt = -Infinity;
+  staleUpTo = -Infinity;
 }
 
 /** Pede permissão e mantém um único watcher de GPS para o app inteiro. */

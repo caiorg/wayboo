@@ -317,9 +317,12 @@ export async function startNavigation(plan: PlanResponse, routeIndex: number, si
 
   try {
     const { tripId } = await api.startTrip(plan.planId, routeIndex);
+    // Encerrada durante o startTrip: a resposta não pode mexer na sessão seguinte.
+    if (gen !== sessionGen) return;
     t.tripId = tripId;
     useNavSession.setState({ tripId });
   } catch (e) {
+    if (gen !== sessionGen) return;
     // Sem servidor a navegação continua; só não haverá aprendizado desta viagem.
     useNavSession.setState({ error: e instanceof Error ? e.message : 'Viagem não registrada' });
   }

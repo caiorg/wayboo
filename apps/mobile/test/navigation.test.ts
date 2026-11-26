@@ -455,6 +455,39 @@ describe('envio do rastro entre viagens', () => {
   });
 });
 
+describe('resposta atrasada de startTrip', () => {
+  const startTrip = vi.mocked(api.startTrip);
+
+  it('a resposta de uma viagem já encerrada não muda a navegação seguinte', async () => {
+    let releaseA!: () => void;
+    startTrip
+      .mockReturnValueOnce(new Promise((r) => (releaseA = () => r({ tripId: 'A' }))))
+      .mockResolvedValueOnce({ tripId: 'B' });
+    const startingA = startNavigation(plan, 0, false);
+    await settle();
+    await stopNavigation();
+    await startNavigation(plan, 0, false);
+    releaseA();
+    await startingA;
+    expect(useNavSession.getState().tripId).toBe('B');
+    await stopNavigation();
+    expect(api.finishTrip).toHaveBeenCalledTimes(1);
+    expect(api.finishTrip).toHaveBeenCalledWith('B');
+  });
+
+  it('a falha de uma viagem já encerrada não mostra erro', async () => {
+    let failA!: () => void;
+    startTrip.mockReturnValueOnce(new Promise((_, reject) => (failA = () => reject(new Error('offline')))));
+    const startingA = startNavigation(plan, 0, false);
+    await settle();
+    await stopNavigation();
+    failA();
+    await startingA;
+    expect(useNavSession.getState().error).toBeNull();
+    expect(useNavSession.getState().tripId).toBeNull();
+  });
+});
+
 describe('navegação com a tela bloqueada sem suporte (web)', () => {
   it('não tenta iniciar nem mostra aviso', async () => {
     mocks.bgSupported = false;
