@@ -499,4 +499,39 @@ describe('navegação sem rede', () => {
       vi.useRealTimers();
     }
   });
+
+  it('recálculo de uma navegação encerrada não mexe na navegação nova', async () => {
+    let answer!: (r: PlanResponse) => void;
+    vi.mocked(api.plan).mockReturnValueOnce(new Promise((r) => (answer = r)));
+    mocks.offRoute = true;
+    useLocationStore.setState({ fix: { t: 1, lat: -23.5, lon: -46.6 } });
+    await startNavigation(plan, 0, false);
+    expect(api.plan).toHaveBeenCalledTimes(1);
+    await stopNavigation();
+    mocks.offRoute = false;
+    const other = { ...plan, planId: 'p3', routes: [{ route: { id: 'r3' }, eta: { segmentDurationsS: [] }, alerts: [] }] } as unknown as PlanResponse;
+    await startNavigation(other, 0, false);
+    answer({ ...plan, planId: 'p2', recommendedIndex: 0, routes: [{ route: { id: 'r2' }, eta: { segmentDurationsS: [] }, alerts: [] }] } as unknown as PlanResponse);
+    await settle();
+    expect(useNavSession.getState()).toMatchObject({ route: { id: 'r3' }, rerouting: false, error: null });
+    expect(api.reroute).not.toHaveBeenCalled();
+    expect(JSON.parse(mocks.async.get(TRIP_KEY)!).plan.planId).toBe('p3');
+  });
+
+  it('grava o lote antes de enviar, sem depender de outra gravação no meio', async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    try {
+      vi.mocked(api.samples).mockReturnValueOnce(new Promise((r) => (release = () => r({ stored: 1 }))));
+      useLocationStore.setState({ fix: { t: 1, lat: -23.5, lon: -46.6 } });
+      await startNavigation(plan, 0, false);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(api.samples).toHaveBeenCalledTimes(1);
+      const saved = JSON.parse(mocks.async.get(TRIP_KEY)!) as { buffer: { t: number }[] };
+      expect(saved.buffer.map((x) => x.t)).toEqual([1]);
+    } finally {
+      release?.();
+      vi.useRealTimers();
+    }
+  });
 });

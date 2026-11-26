@@ -65,6 +65,8 @@ let buffer: TraceSample[] = [];
 let inFlight: TraceSample[] = [];
 let lastRerouteAt = 0;
 let finishing = false;
+/** Sobe a cada navegação encerrada ou iniciada: uma resposta que chega depois é de outra sessão e é descartada. */
+let sessionGen = 0;
 let keepAwakeActive = false;
 let keepAwakeQueue: Promise<void> = Promise.resolve();
 
@@ -187,13 +189,13 @@ const currentApiUrl = () => normalizeApiUrl(useSettings.getState().apiUrl);
  * Grava a navegação real em curso para retomá-la se o app fechar. A simulação não é gravada.
  * Só a rota seguida entra no plano gravado, e o rastro só quando há viagem no servidor para recebê-lo.
  */
-function persistTrip() {
+function persistTrip(): Promise<void> {
   const s = useNavSession.getState();
-  if (s.status !== 'navigating' || s.simulated || finishing || !s.plan || !s.route) return;
+  if (s.status !== 'navigating' || s.simulated || finishing || !s.plan || !s.route) return Promise.resolve();
   const routeId = s.route.id;
   const chosen = s.plan.routes.find((r) => r.route.id === routeId);
-  if (!chosen) return;
-  void saveActiveTrip({
+  if (!chosen) return Promise.resolve();
+  return saveActiveTrip({
     savedAt: Date.now(),
     apiUrl: currentApiUrl(),
     plan: { ...s.plan, routes: [chosen], recommendedIndex: 0 },
@@ -223,6 +225,8 @@ async function sendBuffer() {
   buffer = [];
   inFlight = batch;
   try {
+    // Grava antes de enviar: se o app fechar durante o envio, a retomada ainda tem o lote.
+    await persistTrip();
     await api.samples(tripId, batch);
   } catch {
     // Sem rede: devolve ao buffer para a próxima tentativa (limite para não crescer sem fim).
@@ -241,6 +245,7 @@ function cleanup() {
   flushTimer = null;
   navigator = null;
   speechGen++;
+  sessionGen++;
   Speech.stop();
   releaseKeepAwake();
 }
@@ -248,21 +253,24 @@ function cleanup() {
 async function reroute(fix: NavFix) {
   const s = useNavSession.getState();
   if (!s.plan || s.rerouting) return;
+  const gen = sessionGen;
   lastRerouteAt = Date.now();
   useNavSession.setState({ rerouting: true });
   speak('Recalculando rota');
   try {
     const { avoidTolls, avoidHighways } = useSettings.getState();
     const next = await api.plan(rerouteRequest(s.plan, fix, s.stops, { avoidTolls, avoidHighways, avoidFerries: false }));
+    if (gen !== sessionGen) return;
     const chosen = next.routes[next.recommendedIndex]!;
     if (s.tripId) await api.reroute(s.tripId, next.planId, next.recommendedIndex);
-    // Encerrada durante o recálculo: não ressuscita o navegador.
-    if (finishing || useNavSession.getState().status !== 'navigating') return;
+    // Encerrada (ou trocada por outra) durante o recálculo: não ressuscita o navegador.
+    if (gen !== sessionGen || finishing || useNavSession.getState().status !== 'navigating') return;
     // Só depois do registro: se ele falhar, navegador, rota e plano continuam todos na rota anterior.
     navigator = createNavigator(chosen.route, { segmentDurationsS: chosen.eta.segmentDurationsS });
     useNavSession.setState({ route: chosen.route, plan: { ...next, destination: s.plan.destination }, rerouting: false, error: null });
-    persistTrip();
+    void persistTrip();
   } catch (e) {
+    if (gen !== sessionGen) return;
     // Sem rede o navegador antigo continua valendo: a orientação segue pela rota já calculada.
     const error = e instanceof ApiError && e.status === 0 ? 'Sem conexão: seguindo a rota anterior.' : e instanceof Error ? e.message : 'Falha ao recalcular';
     useNavSession.setState({ rerouting: false, error });
@@ -277,7 +285,7 @@ function onFix(fix: NavFix) {
   useNavSession.setState(stops === s.stops ? { nav: st } : { nav: st, stops });
   if (st.announcement) speak(st.announcement);
   if (!s.simulated) buffer.push({ t: fix.t, lat: fix.lat, lon: fix.lon, speed: fix.speed ?? null, heading: fix.heading ?? null, accuracy: fix.accuracy ?? null });
-  if (stops !== s.stops) persistTrip();
+  if (stops !== s.stops) void persistTrip();
   if (st.arrived) {
     void stopNavigation();
     return;
@@ -327,11 +335,11 @@ export async function startNavigation(plan: PlanResponse, routeIndex: number, si
     return;
   }
 
-  persistTrip();
+  void persistTrip();
   try {
     const { tripId } = await api.startTrip(plan.planId, routeIndex);
     useNavSession.setState({ tripId });
-    persistTrip();
+    void persistTrip();
   } catch (e) {
     // Sem servidor a navegação continua; só não haverá aprendizado desta viagem.
     useNavSession.setState({ error: e instanceof Error ? e.message : 'Viagem não registrada' });
