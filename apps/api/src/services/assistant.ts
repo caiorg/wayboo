@@ -73,7 +73,7 @@ export async function assistant(userId: string, text: string, origin: LatLon, ti
   const stops: StopSuggestion[] = [];
   if (intent.stops.length) {
     // Rota provisória para procurar a parada perto do caminho, não só perto da origem.
-    const [draft] = await valhalla.route([origin, destination], options, 0);
+    const [draft] = await valhalla.route([origin, destination], options, 0, { speedLimits: false });
     if (draft) {
       const cum = cumulativeDistances(draft.geometry);
       const lats = draft.geometry.map((c) => c[1]);

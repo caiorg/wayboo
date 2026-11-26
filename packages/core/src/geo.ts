@@ -46,6 +46,31 @@ export function decodePolyline(str: string, precision = 6): Coord[] {
   return out;
 }
 
+/** Codifica polyline, o inverso de `decodePolyline`. */
+export function encodePolyline(coords: Coord[], precision = 6): string {
+  const factor = 10 ** precision;
+  let out = '';
+  let prevLat = 0;
+  let prevLon = 0;
+  const enc = (v: number) => {
+    let n = v < 0 ? ~(v << 1) : v << 1;
+    while (n >= 0x20) {
+      out += String.fromCharCode((0x20 | (n & 0x1f)) + 63);
+      n >>= 5;
+    }
+    out += String.fromCharCode(n + 63);
+  };
+  for (const [lon, lat] of coords) {
+    const la = Math.round(lat * factor);
+    const lo = Math.round(lon * factor);
+    enc(la - prevLat);
+    enc(lo - prevLon);
+    prevLat = la;
+    prevLon = lo;
+  }
+  return out;
+}
+
 export function cumulativeDistances(coords: Coord[]): number[] {
   const cum = [0];
   for (let i = 1; i < coords.length; i++) cum.push(cum[i - 1]! + haversine(coords[i - 1]!, coords[i]!));
