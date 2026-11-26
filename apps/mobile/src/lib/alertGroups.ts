@@ -104,3 +104,16 @@ export function alertsBox(alerts: RoadAlert[], pad = 0.001): { minLat: number; m
   const lons = alerts.map((a) => a.lon);
   return { minLat: Math.min(...lats) - pad, minLon: Math.min(...lons) - pad, maxLat: Math.max(...lats) + pad, maxLon: Math.max(...lons) + pad };
 }
+
+/**
+ * Grava cópias novas sobre `cur` com a mesma regra de `mergeAlerts`: fica a de mais votos. Uma recarga
+ * que começou antes de um voto chega com menos votos e não apaga a resposta do voto.
+ */
+export function upsertAlerts(cur: RoadAlert[], incoming: RoadAlert[]): RoadAlert[] {
+  const byId = new Map(cur.map((a) => [a.id, a]));
+  for (const a of incoming) {
+    const prev = byId.get(a.id);
+    byId.set(a.id, prev ? pick(prev, a) : a);
+  }
+  return [...byId.values()];
+}

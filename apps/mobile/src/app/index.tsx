@@ -10,7 +10,7 @@ import { AlertSheet, ArrivalCard, ReportSheet, SuggestionCard } from '@/componen
 import { RouteSheet } from '@/components/RouteSheet';
 import { SearchPanel } from '@/components/SearchPanel';
 import { Card, IconButton, T } from '@/components/ui';
-import { alertsBox, alertsByIds, groupIdsOf, mergeAlerts } from '@/lib/alertGroups';
+import { alertsBox, alertsByIds, groupIdsOf, mergeAlerts, upsertAlerts } from '@/lib/alertGroups';
 import { api, ApiError, RegistrationLimitError, type GeocodeResult } from '@/lib/api';
 import { checkReportAccuracy } from '@/lib/gpsAccuracy';
 import { startLocation, useLocationStore } from '@/lib/location';
@@ -125,7 +125,7 @@ export default function MapScreen() {
         const { alerts } = await api.alerts(box);
         if (useSettings.getState().userId !== who) return;
         const fresh = new Map(alerts.map((a) => [a.id, a]));
-        setFreshAlerts((cur) => [...cur.filter((x) => !fresh.has(x.id)), ...fresh.values()]);
+        setFreshAlerts((cur) => upsertAlerts(cur, alerts));
         if (alerts.length < 500) {
           const gone = list.filter((a) => !fresh.has(a.id)).map((a) => a.id);
           if (gone.length) setGoneAlerts((cur) => new Set([...cur, ...gone]));
@@ -292,7 +292,7 @@ export default function MapScreen() {
       const updated = await api.vote(a.id, up);
       // Os dados foram apagados durante a chamada: o voto é da identidade antiga.
       if (useSettings.getState().userId !== voter) return;
-      setFreshAlerts((cur) => [...cur.filter((x) => x.id !== updated.id), updated]);
+      setFreshAlerts((cur) => upsertAlerts(cur, [updated]));
       if (Date.parse(updated.expiresAt) <= Date.now()) notify('Alerta tirado do mapa. Obrigado!');
       else notify(up ? 'Confirmação registrada. Obrigado!' : 'Negação registrada. Obrigado!');
     } catch (e) {

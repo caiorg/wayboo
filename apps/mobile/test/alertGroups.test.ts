@@ -1,6 +1,6 @@
 import type { AlertType, RoadAlert } from '@wayboo/core';
 import { describe, expect, it } from 'vitest';
-import { ALERT_SEVERITY, alertsBox, alertsByIds, groupAlerts, groupIdsOf, mergeAlerts, SAME_SPOT_M, timeAgoPtBR, voteStatus } from '../src/lib/alertGroups';
+import { ALERT_SEVERITY, alertsBox, alertsByIds, groupAlerts, upsertAlerts, groupIdsOf, mergeAlerts, SAME_SPOT_M, timeAgoPtBR, voteStatus } from '../src/lib/alertGroups';
 
 let seq = 0;
 function alert(type: AlertType, lat: number, lon: number, createdAt = '2026-11-23T10:00:00.000Z'): RoadAlert {
@@ -162,5 +162,21 @@ describe('alertsBox', () => {
 
   it('sem alertas, não há caixa', () => {
     expect(alertsBox([])).toBeNull();
+  });
+});
+
+describe('upsertAlerts', () => {
+  it('uma recarga iniciada antes do voto não apaga a cópia votada', () => {
+    const before = alert('police', -23.55, -46.63);
+    const voted = { ...before, upvotes: 1, mine: false, myVote: 'up' as const };
+    const staleRefresh = { ...before, mine: false, myVote: null };
+    expect(upsertAlerts([voted], [staleRefresh])).toEqual([voted]);
+  });
+
+  it('cópia nova, com mais votos, substitui a antiga e acrescenta ids novos', () => {
+    const a = alert('police', -23.55, -46.63);
+    const b = alert('flood', -23.55, -46.63);
+    const newer = { ...a, upvotes: 2 };
+    expect(upsertAlerts([a], [newer, b])).toEqual([newer, b]);
   });
 });
