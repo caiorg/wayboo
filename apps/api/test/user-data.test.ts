@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app';
 import { config } from '../src/config';
 import { db, exportUserData, purgeExpiredTraces, saveRoutineRoutes, type UserDataExport } from '../src/db';
-import { client, makeRoute } from './helpers';
+import { client, makeRoute, TZ } from './helpers';
 
 const ROUTE = makeRoute();
 const HOUR_MS = 3_600_000;
@@ -26,13 +26,34 @@ vi.mock('../src/providers/routing', () => ({
 vi.mock('../src/providers/geo-services', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/providers/geo-services')>()),
   currentWeather: async () => null,
+  geocode: async () => [{ name: 'Destino', label: 'Destino', lat: ROUTE.geometry.at(-1)![1], lon: ROUTE.geometry.at(-1)![0], category: null }],
 }));
+/** Como `hold`, mas na interpretação do pedido do assistente (modelo de linguagem lento). */
+let intentHold: { entered: () => void; release: Promise<void> } | null = null;
+vi.mock('../src/ai/planner', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/ai/planner')>();
+  return {
+    ...actual,
+    parseIntent: async (...args: Parameters<typeof actual.parseIntent>) => {
+      if (intentHold) {
+        intentHold.entered();
+        await intentHold.release;
+      }
+      return actual.parseIntent(...args);
+    },
+  };
+});
 
 let app: Awaited<ReturnType<typeof buildApp>>;
 beforeAll(async () => {
   app = await buildApp({ logger: false });
 });
 afterAll(() => app.close());
+// Um teste que falha antes de soltar a espera não deixa os seguintes presos nela.
+afterEach(() => {
+  hold = null;
+  intentHold = null;
+});
 
 const api = client(() => app, ROUTE);
 const { register, call } = api;
@@ -196,6 +217,49 @@ describe('dados do usuário', () => {
     expect((await call(user, 'POST', '/plan', api.planRequest)).status).toBe(200);
     expect(count('SELECT COUNT(*) AS n FROM plans WHERE user_id = ?', user.userId)).toBe(0);
     expect(count('SELECT COUNT(*) AS n FROM plans WHERE user_id = ?', newId)).toBe(1);
+  });
+
+  it('assistente não grava o plano quando DELETE /me chega durante a interpretação do pedido', async () => {
+    const user = await register();
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      intentHold = { entered: resolve, release: new Promise((r) => (release = r)) };
+    });
+    const pending = call(user, 'POST', '/assistant', { text: 'ir para o Parque Ibirapuera', origin: api.planRequest.origin, timeZone: TZ });
+    await entered;
+
+    expect((await call(user, 'DELETE', '/me')).status).toBe(200);
+    intentHold = null;
+    release();
+
+    expect((await pending).status).toBe(409);
+    expect(count('SELECT COUNT(*) AS n FROM plans WHERE user_id = ?', user.userId)).toBe(0);
+  });
+
+  it('plano em curso não é gravado para id em deleted_users, mesmo sem a exclusão neste processo', async () => {
+    // Simula a exclusão feita antes de reiniciar o servidor ou por outro processo: só a linha em `deleted_users`.
+    const user = await register();
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      hold = { entered: resolve, release: new Promise((r) => (release = r)) };
+    });
+    const pending = call(user, 'POST', '/plan', api.planRequest);
+    await entered;
+
+    db.prepare('INSERT INTO deleted_users (user_id) VALUES (?)').run(user.userId);
+    hold = null;
+    release();
+
+    expect((await pending).status).toBe(409);
+    expect(count('SELECT COUNT(*) AS n FROM plans WHERE user_id = ?', user.userId)).toBe(0);
+  });
+
+  it('não grava routine_routes de id em deleted_users', () => {
+    const id = randomUUID();
+    const p = { lat: -23.5, lon: -46.6 };
+    db.prepare('INSERT INTO deleted_users (user_id) VALUES (?)').run(id);
+    saveRoutineRoutes(id, 'a', 'b', { from: p, to: p, fetchedAt: Date.now(), routes: [] });
+    expect(count('SELECT COUNT(*) AS n FROM routine_routes WHERE user_id = ?', id)).toBe(0);
   });
 
   it('apagar remove tudo do usuário, invalida o token e não mexe nos dados de outro', async () => {

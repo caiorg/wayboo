@@ -116,6 +116,12 @@ export async function buildApp(opts: { logger?: boolean } = {}) {
     return reply.status(500).send({ error: 'Erro interno' });
   });
 
+  // CWE-525: quase toda rota devolve dado do usuário ou recebe a posição dele na URL, e nenhuma tem cache útil.
+  // Por isso nada fica guardado no cliente, a menos que a rota defina o próprio `cache-control`.
+  app.addHook('onSend', async (_req, reply) => {
+    if (!reply.hasHeader('cache-control')) reply.header('cache-control', 'no-store');
+  });
+
   app.get('/health', async () => ({ ok: true, ai: llm ? { provider: llm.name, model: llm.model } : null, map: config.mapStyles }));
 
   // Cada registro cria uma linha em `devices`: sem limite, um cliente enche a tabela.
@@ -220,10 +226,7 @@ export async function buildApp(opts: { logger?: boolean } = {}) {
   // Portabilidade e eliminação (LGPD art. 18). O que é guardado está em docs/privacidade.md.
   app.get('/me/export', async (req, reply) => {
     const data = exportUserData(userOf(req));
-    return reply
-      .header('content-disposition', 'attachment; filename="wayboo-dados.json"')
-      .header('cache-control', 'no-store')
-      .send(data);
+    return reply.header('content-disposition', 'attachment; filename="wayboo-dados.json"').send(data);
   });
 
   app.delete('/me', async (req) => ({ deleted: deleteUserData(userOf(req)) }));
