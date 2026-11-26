@@ -44,10 +44,17 @@ export const useOfflineRoute = create<OfflineRouteState>(() => ({
 
 const keyOf = (routeId: string, styles: string[]) => `${routeId} ${styles.join(' ')}`;
 
+/**
+ * Sobe a cada mudança de `done` ou `limited` (preparo ou fim de download). Uma releitura que começou antes é de
+ * um estado velho: em vez de gravar, lê de novo.
+ */
+let revision = 0;
+
 /** Calcula as partes da rota e marca as já salvas em todos os estilos. */
 export async function prepareOfflineRoute(route: Pick<Route, 'id' | 'geometry'>, styles: string[]): Promise<void> {
   const key = keyOf(route.id, styles);
   if (useOfflineRoute.getState().key === key) return;
+  revision++;
   useOfflineRoute.setState({ key, routeId: route.id, styles, parts: corridorDownloads(route.geometry), done: [], limited: [], ready: false, message: null });
   await refreshSavedParts();
 }
@@ -56,11 +63,18 @@ export async function prepareOfflineRoute(route: Pick<Route, 'id' | 'geometry'>,
 export async function refreshSavedParts(): Promise<void> {
   const { key, routeId, styles, parts } = useOfflineRoute.getState();
   if (!key || !routeId) return;
+  const rev = revision;
   const areas = await listOfflineAreas().catch(() => []);
+  const state = useOfflineRoute.getState();
+  if (state.key !== key) return;
+  if (rev !== revision) return refreshSavedParts();
+  const ours = areas.filter((a) => a.meta.routeId === routeId);
   const done = parts
     .map((_, i) => i + 1)
-    .filter((part) => styles.every((style) => areas.some((a) => a.complete && a.meta.routeId === routeId && a.meta.part === part && a.meta.style === style)));
-  if (useOfflineRoute.getState().key === key) useOfflineRoute.setState({ done, limited: [], ready: true });
+    .filter((part) => styles.every((style) => ours.some((a) => a.complete && a.meta.part === part && a.meta.style === style)));
+  // Parada no limite fica parada enquanto o pacote dela existir; apagado em Ajustes, volta a ser oferecida.
+  const limited = state.limited.filter((part) => !done.includes(part) && ours.some((a) => a.meta.part === part));
+  useOfflineRoute.setState({ done, limited, ready: true });
 }
 
 /** Baixa a próxima parte pendente. Cada parte é um download que o usuário inicia, como os termos exigem. */
@@ -98,6 +112,7 @@ export async function downloadNextPart(styles: string[]): Promise<void> {
         : nowLimited.length
           ? 'Mapa da rota salvo, com partes incompletas.'
           : 'Mapa da rota salvo para usar sem rede.';
+  revision++;
   useOfflineRoute.setState({ done: nowDone, limited: nowLimited, message });
 }
 

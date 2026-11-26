@@ -187,4 +187,50 @@ describe('download do mapa da rota', () => {
     expect(useOfflineRoute.getState().deleting).toBe(false);
     expect(listOfflineAreas).toHaveBeenCalledTimes(2);
   });
+
+  const area = (part: number, style: string, complete: boolean) => ({
+    id: `${part}${style}`,
+    meta: { app: 'wayboo' as const, routeId: 'r1', part, total: 2, style },
+    bytes: 1,
+    complete,
+  });
+
+  it('releitura que começa antes de um download terminar não apaga a parte salva', async () => {
+    await prepareOfflineRoute(route, styles);
+    let finish!: (r: DownloadResult) => void;
+    vi.mocked(downloadArea).mockReturnValueOnce(new Promise((r) => (finish = r)));
+    const downloading = downloadNextPart(styles);
+    let stale!: (a: Awaited<ReturnType<typeof listOfflineAreas>>) => void;
+    vi.mocked(listOfflineAreas)
+      .mockReturnValueOnce(new Promise((r) => (stale = r)))
+      .mockResolvedValueOnce([area(1, styles[0]!, true), area(1, styles[1]!, true)]);
+    const refreshing = refreshSavedParts();
+    finish({ status: 'complete', bytes: 1 });
+    await downloading;
+    expect(useOfflineRoute.getState().done).toEqual([1]);
+    stale([]);
+    await refreshing;
+    expect(useOfflineRoute.getState()).toMatchObject({ done: [1], ready: true });
+  });
+
+  it('releitura atrasada não esquece a parte parada no limite', async () => {
+    await prepareOfflineRoute(route, styles);
+    let finish!: (r: DownloadResult) => void;
+    vi.mocked(downloadArea).mockReturnValueOnce(new Promise((r) => (finish = r)));
+    const downloading = downloadNextPart(styles);
+    let stale!: (a: Awaited<ReturnType<typeof listOfflineAreas>>) => void;
+    vi.mocked(listOfflineAreas)
+      .mockReturnValueOnce(new Promise((r) => (stale = r)))
+      .mockResolvedValueOnce([area(1, styles[0]!, false)]);
+    const refreshing = refreshSavedParts();
+    finish({ status: 'partial', bytes: 46_000_000 });
+    await downloading;
+    stale([]);
+    await refreshing;
+    expect(useOfflineRoute.getState()).toMatchObject({ done: [], limited: [1] });
+    // Sem pacote no aparelho (apagado em Ajustes), a parte volta a ser oferecida.
+    vi.mocked(listOfflineAreas).mockResolvedValueOnce([]);
+    await refreshSavedParts();
+    expect(useOfflineRoute.getState().limited).toEqual([]);
+  });
 });
