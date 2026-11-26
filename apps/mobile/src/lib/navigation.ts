@@ -205,7 +205,18 @@ function persistTrip() {
   });
 }
 
-async function flush() {
+let flushChain: Promise<void> = Promise.resolve();
+
+/**
+ * Envia o rastro pendente. Um envio por vez: um tique que chega com o anterior ainda sem resposta espera na fila,
+ * e `inFlight` guarda sempre o único lote em voo.
+ */
+function flush(): Promise<void> {
+  flushChain = flushChain.then(sendBuffer);
+  return flushChain;
+}
+
+async function sendBuffer() {
   const { tripId } = useNavSession.getState();
   if (!tripId || buffer.length === 0) return;
   const batch = buffer;
@@ -244,8 +255,11 @@ async function reroute(fix: NavFix) {
     const { avoidTolls, avoidHighways } = useSettings.getState();
     const next = await api.plan(rerouteRequest(s.plan, fix, s.stops, { avoidTolls, avoidHighways, avoidFerries: false }));
     const chosen = next.routes[next.recommendedIndex]!;
-    navigator = createNavigator(chosen.route, { segmentDurationsS: chosen.eta.segmentDurationsS });
     if (s.tripId) await api.reroute(s.tripId, next.planId, next.recommendedIndex);
+    // Encerrada durante o recálculo: não ressuscita o navegador.
+    if (finishing || useNavSession.getState().status !== 'navigating') return;
+    // Só depois do registro: se ele falhar, navegador, rota e plano continuam todos na rota anterior.
+    navigator = createNavigator(chosen.route, { segmentDurationsS: chosen.eta.segmentDurationsS });
     useNavSession.setState({ route: chosen.route, plan: { ...next, destination: s.plan.destination }, rerouting: false, error: null });
     persistTrip();
   } catch (e) {

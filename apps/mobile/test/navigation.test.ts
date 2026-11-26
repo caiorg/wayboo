@@ -8,7 +8,13 @@ import { pickVoice, resumeNavigation, startNavigation, stopNavigation, toggleMut
 import { useLocationStore } from '../src/lib/location';
 import { useSettings } from '../src/lib/store';
 
-const mocks = vi.hoisted(() => ({ announcement: null as string | null, offRoute: false, visit: false, async: new Map<string, string>() }));
+const mocks = vi.hoisted(() => ({
+  announcement: null as string | null,
+  offRoute: false,
+  visit: false,
+  async: new Map<string, string>(),
+  navigators: [] as { route: unknown; updates: number }[],
+}));
 
 vi.mock('@react-native-async-storage/async-storage', () => ({
   default: {
@@ -36,7 +42,16 @@ vi.mock('expo-speech', () => ({
 }));
 vi.mock('@wayboo/core', () => ({
   INSTRUCTION_LANGUAGE: 'pt-BR',
-  createNavigator: () => ({ update: () => ({ arrived: false, offRoute: mocks.offRoute, announcement: mocks.announcement }) }),
+  createNavigator: (route: unknown) => {
+    const nav = { route, updates: 0 };
+    mocks.navigators.push(nav);
+    return {
+      update: () => {
+        nav.updates++;
+        return { arrived: false, offRoute: mocks.offRoute, announcement: mocks.announcement };
+      },
+    };
+  },
   simulateDrive: function* () {},
   markVisitedStops: (stops: unknown[]) => (mocks.visit ? [...stops] : stops),
   rerouteRequest: () => ({}),
@@ -92,6 +107,7 @@ beforeEach(() => {
   mocks.announcement = null;
   mocks.offRoute = false;
   mocks.visit = false;
+  mocks.navigators = [];
   mocks.async.clear();
   useSettings.setState({ voice: false });
   useNavSession.setState({ muted: false, status: 'idle', error: null });
@@ -433,6 +449,53 @@ describe('navegação sem rede', () => {
       const after = JSON.parse(mocks.async.get(TRIP_KEY)!) as { buffer: { t: number }[] };
       expect(after.buffer.map((x) => x.t)).not.toContain(1);
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('recálculo que o servidor não registra mantém o navegador da rota anterior', async () => {
+    const next = { ...plan, planId: 'p2', recommendedIndex: 0, routes: [{ route: { id: 'r2' }, eta: { segmentDurationsS: [] }, alerts: [] }] };
+    vi.mocked(api.plan).mockResolvedValueOnce(next as unknown as PlanResponse);
+    vi.mocked(api.reroute).mockRejectedValueOnce(new ApiError(0, 'Sem conexão'));
+    mocks.offRoute = true;
+    useLocationStore.setState({ fix: { t: 1, lat: -23.5, lon: -46.6 } });
+    await startNavigation(plan, 0, false);
+    await settle();
+    expect(useNavSession.getState().route).toEqual({ id: 'r0' });
+    mocks.offRoute = false;
+    useLocationStore.setState({ fix: { t: 2, lat: -23.5, lon: -46.6 } });
+    const old = mocks.navigators.find((n) => (n.route as { id: string }).id === 'r0')!;
+    const fresh = mocks.navigators.find((n) => (n.route as { id: string }).id === 'r2');
+    expect(old.updates).toBe(2);
+    expect(fresh?.updates ?? 0).toBe(0);
+  });
+
+  it('um envio do rastro espera o anterior e nenhum lote sai da gravação antes da confirmação', async () => {
+    vi.useFakeTimers();
+    try {
+      const confirms: (() => void)[] = [];
+      vi.mocked(api.samples).mockImplementation(() => new Promise((r) => confirms.push(() => r({ stored: 1 }))));
+      useLocationStore.setState({ fix: { t: 1, lat: -23.5, lon: -46.6 } });
+      await startNavigation(plan, 0, false);
+      await vi.advanceTimersByTimeAsync(15_000);
+      useLocationStore.setState({ fix: { t: 2, lat: -23.5, lon: -46.6 } });
+      // O primeiro envio ainda espera: o segundo tique não começa outro.
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(api.samples).toHaveBeenCalledTimes(1);
+      mocks.visit = true;
+      useLocationStore.setState({ fix: { t: 3, lat: -23.5, lon: -46.6 } });
+      await vi.advanceTimersByTimeAsync(0);
+      const saved = JSON.parse(mocks.async.get(TRIP_KEY)!) as { buffer: { t: number }[] };
+      expect(saved.buffer.map((x) => x.t)).toEqual([1, 2, 3]);
+      confirms[0]!();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(api.samples).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(api.samples).mock.calls[1]![1].map((x) => x.t)).toEqual([2, 3]);
+      confirms[1]!();
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.mocked(api.samples).mockReset();
+      vi.mocked(api.samples).mockImplementation(async () => ({ stored: 0 }));
       vi.useRealTimers();
     }
   });
