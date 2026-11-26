@@ -1,7 +1,7 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Map as MlMap, setWorkerUrl, type GeoJSONSource, type LayerSpecification, type MapMouseEvent } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import { ALERT_LAYERS, alertIdOf, buildSources, GLYPH_IMAGE_SIZE, layerSpecs, MAP_GLYPHS, SOURCE, type MapViewProps } from './mapData';
 
 // O Metro não resolve o worker que o maplibre-gl 6 carrega via import.meta.url.
@@ -49,7 +49,10 @@ export function MapView({ theme, data, camera, initialCenter, onLongPress, onUse
   const el = useRef<HTMLDivElement>(null);
   const map = useRef<MlMap | null>(null);
   const latest = useRef({ data, theme, onLongPress, onUserPan, onAlertPress });
-  latest.current = { data, theme, onLongPress, onUserPan, onAlertPress };
+  // Depois de cada commit e antes dos eventos do usuário: uma renderização descartada não vaza para os handlers.
+  useLayoutEffect(() => {
+    latest.current = { data, theme, onLongPress, onUserPan, onAlertPress };
+  });
 
   const install = (m: MlMap) => {
     const sources = buildSources(latest.current.data);

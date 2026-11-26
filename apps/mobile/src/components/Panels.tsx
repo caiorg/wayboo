@@ -81,8 +81,10 @@ export function AlertSheet({
   return (
     <Card style={{ gap: 12 }}>
       <View style={styles.row}>
-        <View style={{ flex: 1, gap: 2 }} accessibilityRole="header">
-          <T variant="title">{title}</T>
+        <View style={{ flex: 1, gap: 2 }}>
+          <View accessibilityRole="header">
+            <T variant="title">{title}</T>
+          </View>
           {alerts.some((a) => voteStatus(a) === 'open') ? (
             <T variant="caption">Confirmar renova a validade. Negações tiram o alerta do mapa. O voto não pode ser trocado.</T>
           ) : null}

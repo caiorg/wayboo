@@ -35,6 +35,7 @@ import {
   registerDevice,
   revokeDevice,
   setShareCrowd,
+  transaction,
   upsertPlace,
 } from './db';
 import { geocode, reverseGeocode } from './providers/geo-services';
@@ -90,16 +91,19 @@ function castVote(userId: string, alertId: string, up: boolean, now = Date.now()
   if (!a) throw new HttpError(404, 'Alerta não encontrado');
   if (a.reporter === userId) return 'own';
   if (db.prepare('SELECT 1 FROM alert_votes WHERE alert_id = ? AND user_id = ?').get(alertId, userId)) return 'repeated';
-  db.prepare('INSERT INTO alert_votes (alert_id, user_id, up) VALUES (?, ?, ?)').run(alertId, userId, up ? 1 : 0);
   const ttl = ALERT_TTL_MIN[a.type]! * 60_000;
-  // Confirmação renova a validade; "não está mais lá" encurta. Três negativos a mais que positivos removem.
-  if (up) db.prepare('UPDATE alerts SET up = up + 1, expires_at = MAX(expires_at, ?) WHERE id = ?').run(now + ttl, alertId);
-  else
-    db.prepare('UPDATE alerts SET down = down + 1, expires_at = CASE WHEN down + 1 - up >= 3 THEN ? ELSE expires_at - ? END WHERE id = ?').run(
-      now,
-      Math.round(ttl / 3),
-      alertId,
-    );
+  // Voto e contadores juntos: um voto gravado sem a contagem ficaria preso como `repeated`.
+  transaction(() => {
+    db.prepare('INSERT INTO alert_votes (alert_id, user_id, up) VALUES (?, ?, ?)').run(alertId, userId, up ? 1 : 0);
+    // Confirmação renova a validade; "não está mais lá" encurta. Três negativos a mais que positivos removem.
+    if (up) db.prepare('UPDATE alerts SET up = up + 1, expires_at = MAX(expires_at, ?) WHERE id = ?').run(now + ttl, alertId);
+    else
+      db.prepare('UPDATE alerts SET down = down + 1, expires_at = CASE WHEN down + 1 - up >= 3 THEN ? ELSE expires_at - ? END WHERE id = ?').run(
+        now,
+        Math.round(ttl / 3),
+        alertId,
+      );
+  });
   return 'ok';
 }
 
