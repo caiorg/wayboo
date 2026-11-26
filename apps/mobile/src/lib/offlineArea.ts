@@ -126,9 +126,12 @@ export interface PackProgress {
 export const countedBytes = (s: PackProgress, reusesTiles: boolean) =>
   reusesTiles ? s.completedResourceSize - s.completedTileSize : s.completedResourceSize;
 
-/** O que fazer com um pacote a cada evento de progresso. */
-export function judgeProgress(status: PackProgress, { reusesTiles = false } = {}): DownloadVerdict {
+/**
+ * O que fazer com um pacote a cada evento de progresso. `alreadyBytes` são os bytes dos pacotes anteriores do mesmo
+ * download (os outros estilos da parte): todos dividem os mesmos 50 MB.
+ */
+export function judgeProgress(status: PackProgress, { reusesTiles = false, alreadyBytes = 0 } = {}): DownloadVerdict {
   if (status.state === 'complete') return 'complete';
-  if (countedBytes(status, reusesTiles) >= STOP_AT_BYTES || status.completedTileCount >= MAX_TILES_PER_DOWNLOAD) return 'limit';
+  if (alreadyBytes + countedBytes(status, reusesTiles) >= STOP_AT_BYTES || status.completedTileCount >= MAX_TILES_PER_DOWNLOAD) return 'limit';
   return 'downloading';
 }

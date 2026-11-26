@@ -39,6 +39,9 @@ async function statusOf(pack: OfflinePack): Promise<OfflinePackStatus | null> {
   return (await pack.status().catch(() => null)) ?? null;
 }
 
+/** Como contar os bytes de um pacote dentro do download da parte. */
+type Budget = { reusesTiles: boolean; alreadyBytes: number };
+
 type Followed = { verdict: 'complete' | 'limit'; bytes: number } | { error: string };
 
 /**
@@ -54,7 +57,7 @@ async function halt(pack: OfflinePack): Promise<void> {
 }
 
 /** Espera o pacote terminar, bater num limite dos termos, falhar ou ser parado por fora. Pausa nos três últimos. */
-function follow(pack: OfflinePack, reusesTiles: boolean, onProgress: (status: OfflinePackStatus) => void): Promise<Followed> {
+function follow(pack: OfflinePack, budget: Budget, onProgress: (status: OfflinePackStatus) => void): Promise<Followed> {
   return new Promise((resolve) => {
     let settled = false;
     let sawActive = false;
@@ -80,8 +83,8 @@ function follow(pack: OfflinePack, reusesTiles: boolean, onProgress: (status: Of
         void finish({ error: 'Download interrompido.' }, false);
         return;
       }
-      const verdict = judgeProgress(status, { reusesTiles });
-      if (verdict !== 'downloading') void finish({ verdict, bytes: countedBytes(status, reusesTiles) }, verdict === 'limit');
+      const verdict = judgeProgress(status, budget);
+      if (verdict !== 'downloading') void finish({ verdict, bytes: countedBytes(status, budget.reusesTiles) }, verdict === 'limit');
     };
     OfflineManager.addListener(
       pack.id,
@@ -100,7 +103,7 @@ function follow(pack: OfflinePack, reusesTiles: boolean, onProgress: (status: Of
 
 type Opened = { pack: OfflinePack } | { done: Followed };
 
-async function openPack(style: string, bounds: Bounds, meta: OfflineMeta, reusesTiles: boolean): Promise<Opened> {
+async function openPack(style: string, bounds: Bounds, meta: OfflineMeta, budget: Budget): Promise<Opened> {
   const existing = (await OfflineManager.getPacks()).find(
     (p) => isOurs(p.metadata) && p.metadata.routeId === meta.routeId && p.metadata.part === meta.part && p.metadata.style === style,
   );
@@ -108,8 +111,8 @@ async function openPack(style: string, bounds: Bounds, meta: OfflineMeta, reuses
     const status = await statusOf(existing);
     if (status) {
       // Completo ou já no limite: retomar só baixaria mais além dos 50 MB.
-      const verdict = judgeProgress(status, { reusesTiles });
-      if (verdict !== 'downloading') return { done: { verdict, bytes: countedBytes(status, reusesTiles) } };
+      const verdict = judgeProgress(status, budget);
+      if (verdict !== 'downloading') return { done: { verdict, bytes: countedBytes(status, budget.reusesTiles) } };
       // Tentativa anterior parou no meio (erro ou app fechado): retoma em vez de criar outro pacote igual.
       await existing.resume();
       return { pack: existing };
@@ -134,14 +137,14 @@ export async function downloadArea(
 ): Promise<DownloadResult> {
   let bytes = 0;
   for (const [i, style] of styles.entries()) {
-    const reusesTiles = i > 0;
+    const budget: Budget = { reusesTiles: i > 0, alreadyBytes: bytes };
     try {
-      const opened = await openPack(style, bounds, meta, reusesTiles);
+      const opened = await openPack(style, bounds, meta, budget);
       const result =
         'done' in opened
           ? opened.done
-          : await follow(opened.pack, reusesTiles, (s) =>
-              onProgress({ percentage: ((i + s.percentage / 100) / styles.length) * 100, bytes: bytes + countedBytes(s, reusesTiles) }),
+          : await follow(opened.pack, budget, (s) =>
+              onProgress({ percentage: ((i + s.percentage / 100) / styles.length) * 100, bytes: bytes + countedBytes(s, budget.reusesTiles) }),
             );
       if ('error' in result) return { status: 'error', message: result.error };
       bytes += result.bytes;

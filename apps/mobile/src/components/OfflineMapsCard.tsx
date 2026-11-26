@@ -11,6 +11,8 @@ export function OfflineMapsCard() {
 function OfflineMapsCardBody() {
   // null enquanto carrega.
   const [parts, setParts] = useState<number | null>(null);
+  // Pacotes no aparelho, completos ou não: um download que parou no meio também ocupa espaço.
+  const [packs, setPacks] = useState(0);
   // Dois toques, como "Apagar meus dados": o primeiro arma, o segundo apaga.
   const [state, setState] = useState<'idle' | 'confirm' | 'deleting'>('idle');
   const [msg, setMsg] = useState<string | null>(null);
@@ -24,8 +26,10 @@ function OfflineMapsCardBody() {
       const key = (a: (typeof areas)[number]) => `${a.meta.routeId} ${a.meta.part}`;
       const incomplete = new Set(areas.filter((a) => !a.complete).map(key));
       setParts(new Set(areas.map(key).filter((k) => !incomplete.has(k))).size);
+      setPacks(areas.length);
     } catch {
       setParts(0);
+      setPacks(0);
       setMsg('Não foi possível ler os mapas salvos.');
     }
   };
@@ -60,10 +64,12 @@ function OfflineMapsCardBody() {
         {parts === null
           ? 'Lendo mapas salvos…'
           : parts === 0
-            ? 'Nenhum mapa salvo. Baixe o mapa de uma rota na tela de rotas, antes de sair.'
+            ? packs > 0
+              ? 'Nenhuma parte de rota completa. Há downloads interrompidos ocupando espaço neste aparelho.'
+              : 'Nenhum mapa salvo. Baixe o mapa de uma rota na tela de rotas, antes de sair.'
             : `${parts} ${parts === 1 ? 'parte de rota salva' : 'partes de rota salvas'} neste aparelho.`}
       </T>
-      {parts || downloading ? (
+      {packs > 0 || downloading ? (
         <Button
           label={state === 'confirm' ? 'Confirmar: apagar mapas' : 'Apagar mapas offline'}
           kind="danger"

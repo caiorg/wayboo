@@ -147,10 +147,19 @@ describe('downloadArea', () => {
 
   it('no segundo estilo, os tiles reaproveitados não contam para os 50 MB', async () => {
     const done = downloadArea({ styles: ['https://s/light', 'https://s/dark'], bounds, meta: meta() }, () => {});
-    await emit({ state: 'complete', percentage: 100, completedResourceSize: 30_000_000, completedTileSize: 29_000_000 });
-    await emit({ completedResourceSize: STOP_AT_BYTES + 1, completedTileSize: 29_000_000 });
-    await emit({ state: 'complete', percentage: 100, completedResourceSize: STOP_AT_BYTES + 2, completedTileSize: 29_000_000 });
+    await emit({ state: 'complete', percentage: 100, completedResourceSize: 5_000_000, completedTileSize: 4_000_000 });
+    await emit({ completedResourceSize: STOP_AT_BYTES + 1, completedTileSize: STOP_AT_BYTES - 1_000_000 });
+    await emit({ state: 'complete', percentage: 100, completedResourceSize: STOP_AT_BYTES + 2, completedTileSize: STOP_AT_BYTES - 1_000_000 });
     await expect(done).resolves.toMatchObject({ status: 'complete' });
+  });
+
+  it('os dois estilos dividem os mesmos 50 MB', async () => {
+    const done = downloadArea({ styles: ['https://s/light', 'https://s/dark'], bounds, meta: meta() }, () => {});
+    await emit({ state: 'complete', percentage: 100, completedResourceSize: 40_000_000, completedTileSize: 39_000_000 });
+    // 7 MB de estilo, sprites e fontes no segundo: 40 + 7 passa do ponto de parada.
+    await emit({ completedResourceSize: 46_000_000, completedTileSize: 39_000_000 });
+    await expect(done).resolves.toEqual({ status: 'partial', bytes: 47_000_000 });
+    expect(h.packs[1]!.pause).toHaveBeenCalled();
   });
 
   it('pacote pausado ou apagado por fora encerra o download com erro', async () => {
