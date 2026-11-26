@@ -28,6 +28,7 @@ import {
   getSamples,
   getShareCrowd,
   insertSamples,
+  lastSampleT,
   loadStats,
   newPlace,
   saveLiveObservations,
@@ -89,11 +90,18 @@ export function startTrip(userId: string, planId: string, routeIndex: number, ti
 export function addSamples(userId: string, tripId: string, samples: TraceSample[]): { stored: number } {
   const trip = ownTrip(userId, tripId);
   if (trip.status !== 'active') throw new HttpError(409, 'Viagem já encerrada');
-  transaction(() => insertSamples(tripId, samples));
-  if (getShareCrowd(userId)) {
+  const prevLastT = transaction(() => {
+    const prev = lastSampleT(tripId);
+    insertSamples(tripId, samples);
+    return prev;
+  });
+  const batchLastT = Math.max(...samples.map((s) => s.t));
+  // Um lote que não avança o rastro é reenvio ou atraso: medir de novo daria um instante recente a uma
+  // medida antiga, porque a idade é calculada a partir da chegada.
+  if (batchLastT > prevLastT && getShareCrowd(userId)) {
     // O ao vivo é melhor esforço: uma falha aqui não pode recusar as amostras, que o app reenviaria.
     try {
-      recordLiveTraffic(userId, tripId, Math.max(...samples.map((s) => s.t)));
+      recordLiveTraffic(userId, tripId, batchLastT);
     } catch (e) {
       console.error('Falha ao medir o trânsito ao vivo', e);
     }
@@ -107,8 +115,8 @@ const LIVE_LOOKBACK_MS = LIVE_WINDOW_MS + 5 * 60_000;
 /**
  * Mede os trechos que o usuário (com opt-in) terminou nos últimos 15 min na etapa atual da viagem
  * e grava no trânsito ao vivo. Roda a cada envio de amostras, que o app faz a cada 15 s.
- * `lastT` é a amostra mais recente do lote, no relógio do aparelho. Vem do lote, e não do banco, para uma
- * amostra com horário absurdo afetar só o próprio envio.
+ * `lastT` é a amostra mais recente do lote, no relógio do aparelho, e é maior que todas as anteriores da viagem.
+ * Uma amostra com horário absurdo no futuro faz a viagem parar de contribuir, sem gravar medida errada.
  */
 function recordLiveTraffic(userId: string, tripId: string, lastT: number, now = Date.now()): void {
   const leg = db.prepare('SELECT * FROM trip_legs WHERE trip_id = ? ORDER BY seq DESC LIMIT 1').get(tripId) as Row | undefined;

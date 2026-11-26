@@ -343,12 +343,14 @@ export function getShareCrowd(userId: string): boolean {
 }
 
 export function setShareCrowd(userId: string, share: boolean): void {
-  db.prepare(
-    `INSERT INTO privacy (user_id, share_crowd, updated_at) VALUES (?, ?, ?)
-     ON CONFLICT(user_id) DO UPDATE SET share_crowd = excluded.share_crowd, updated_at = excluded.updated_at`,
-  ).run(userId, share ? 1 : 0, Date.now());
-  // Revogar o opt-in tira também o que o usuário mediu nos últimos minutos.
-  if (!share) db.prepare('DELETE FROM live_obs WHERE user_id = ?').run(userId);
+  transaction(() => {
+    db.prepare(
+      `INSERT INTO privacy (user_id, share_crowd, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET share_crowd = excluded.share_crowd, updated_at = excluded.updated_at`,
+    ).run(userId, share ? 1 : 0, Date.now());
+    // Revogar o opt-in tira também o que o usuário mediu nos últimos minutos, na mesma transação.
+    if (!share) db.prepare('DELETE FROM live_obs WHERE user_id = ?').run(userId);
+  });
 }
 
 // ---------- trânsito ao vivo ----------
@@ -425,6 +427,12 @@ export function insertSamples(tripId: string, samples: TraceSample[], now = Date
   const stmt = db.prepare('INSERT INTO samples (trip_id, t, lat, lon, speed, heading, accuracy) VALUES (?, ?, ?, ?, ?, ?, ?)');
   for (const s of samples) stmt.run(tripId, s.t, s.lat, s.lon, s.speed ?? null, s.heading ?? null, s.accuracy ?? null);
   db.prepare('UPDATE trips SET last_sample_at = ? WHERE id = ?').run(now, tripId);
+}
+
+/** Instante da amostra mais recente da viagem (relógio do aparelho), ou `-Infinity` sem amostras. */
+export function lastSampleT(tripId: string): number {
+  const r = db.prepare('SELECT MAX(t) AS t FROM samples WHERE trip_id = ?').get(tripId) as Row | undefined;
+  return r?.t == null ? -Infinity : Number(r.t);
 }
 
 /** Amostras da viagem a partir de `since` (relógio do aparelho), em ordem. */

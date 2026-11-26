@@ -28,7 +28,7 @@ afterEach(() => vi.useRealTimers());
 const { register, call, plan } = client(() => app, ROUTE);
 
 /** Usuário que está dirigindo agora a `factor` vezes o tempo do roteador. Envia o rastro sem encerrar a viagem. */
-async function driving(shareCrowd: boolean, factor = 2): Promise<User> {
+async function driving(shareCrowd: boolean, factor = 2): Promise<User & { resend: () => Promise<void> }> {
   const user = await register();
   if (shareCrowd) await call(user, 'PUT', '/privacy', { shareCrowd: true });
   const p = await plan(user);
@@ -38,8 +38,9 @@ async function driving(shareCrowd: boolean, factor = 2): Promise<User> {
   // O rastro inteiro chega num envio logo após a partida: o relógio do aparelho fica ~12 min à frente do servidor,
   // e a API mede a idade de cada trecho pela distância até a última amostra.
   const samples = [...simulateDrive(r, durations, Date.now() + 1000, 2)];
-  expect((await call(user, 'POST', `/trips/${trip.tripId}/samples`, { samples })).status).toBe(200);
-  return user;
+  const send = async () => expect((await call(user, 'POST', `/trips/${trip.tripId}/samples`, { samples })).status).toBe(200);
+  await send();
+  return { ...user, resend: send };
 }
 
 const etaOf = (p: PlanResponse) => p.routes[0]!.eta;
@@ -102,6 +103,18 @@ describe('trânsito ao vivo', () => {
     expect(liveRows()).toEqual([]);
   });
 
+  it('reenviar um lote antigo não renova as observações', async () => {
+    const drivers = [await driving(true), await driving(true), await driving(true)];
+    const before = liveRows();
+    vi.setSystemTime(Date.now() + 10 * MIN);
+    for (const d of drivers) await d.resend();
+    expect(liveRows()).toEqual(before);
+    vi.setSystemTime(Date.now() + 6 * MIN);
+    for (const d of drivers) await d.resend();
+    const observer = await register();
+    expect(etaOf(await plan(observer)).durationS).toBeCloseTo(ROUTE.baseDurationS, 3);
+  });
+
   it('a rotina de retenção apaga as observações vencidas', async () => {
     await driving(true);
     expect(liveRows().length).toBeGreaterThan(0);
@@ -116,6 +129,18 @@ describe('trânsito ao vivo', () => {
     await call(user, 'PUT', '/privacy', { shareCrowd: false });
     expect(liveRows(user.userId)).toEqual([]);
     expect(liveRows(other.userId).length).toBeGreaterThan(0);
+  });
+
+  it('se apagar as observações falha, o opt-in continua como estava', async () => {
+    const user = await driving(true);
+    db.exec(`CREATE TEMP TRIGGER live_obs_block BEFORE DELETE ON live_obs BEGIN SELECT RAISE(ABORT, 'falha'); END`);
+    try {
+      expect((await call(user, 'PUT', '/privacy', { shareCrowd: false })).status).toBe(500);
+    } finally {
+      db.exec('DROP TRIGGER live_obs_block');
+    }
+    expect((await call<{ shareCrowd: boolean }>(user, 'GET', '/privacy')).body.shareCrowd).toBe(true);
+    expect(liveRows(user.userId).length).toBeGreaterThan(0);
   });
 
   it('entra na exportação e sai com DELETE /me', async () => {
