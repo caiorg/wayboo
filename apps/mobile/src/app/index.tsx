@@ -32,6 +32,7 @@ export default function MapScreen() {
   const session = useNavSession();
   const avoidTolls = useSettings((s) => s.avoidTolls);
   const avoidHighways = useSettings((s) => s.avoidHighways);
+  const userId = useSettings((s) => s.userId);
 
   const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [selected, setSelected] = useState(0);
@@ -112,6 +113,14 @@ export default function MapScreen() {
       });
   }, [hereKey, plan, session.status, backgroundError]);
 
+  // Respostas de voto e alertas sumidos são da identidade que votou. Depois de apagar os dados
+  // (`resetIdentity` nos Ajustes), a identidade nova começa sem eles e recarrega a lista abaixo.
+  useEffect(() => {
+    setVotedAlerts([]);
+    setGoneAlerts(new Set());
+    setSelectedAlerts(null);
+  }, [userId]);
+
   // Alertas da comunidade ao redor, atualizados a cada minuto.
   useEffect(() => {
     if (!hereKey) return;
@@ -124,7 +133,7 @@ export default function MapScreen() {
     void load();
     const id = setInterval(load, 60_000);
     return () => clearInterval(id);
-  }, [hereKey, backgroundError, alertsReload]);
+  }, [hereKey, backgroundError, alertsReload, userId]);
 
   const fitPlan = useCallback(
     (p: PlanResponse) => {
