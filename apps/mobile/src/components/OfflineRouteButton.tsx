@@ -10,7 +10,7 @@ import { Button, T } from './ui';
 export function OfflineRouteButton({ route }: { route: Route }) {
   const { light, dark } = useMapStyles();
   const styles = useMemo(() => [...new Set([light, dark])], [light, dark]);
-  const { routeId, parts, done, ready, active, message } = useOfflineRoute();
+  const { routeId, parts, done, ready, active, deleting, message } = useOfflineRoute();
 
   useEffect(() => {
     if (offlineSupported) void prepareOfflineRoute(route, styles);
@@ -25,11 +25,13 @@ export function OfflineRouteButton({ route }: { route: Route }) {
     ? `Baixando parte ${mine.part} de ${total} · ${mine.percentage}%`
     : active
       ? 'Outro mapa está sendo baixado'
-      : saved
-      ? 'Mapa da rota salvo'
-      : total === 1
-        ? 'Baixar mapa da rota'
-        : `Baixar parte ${next} de ${total} do mapa`;
+      : deleting
+        ? 'Apagando mapas salvos'
+        : saved
+          ? 'Mapa da rota salvo'
+          : total === 1
+            ? 'Baixar mapa da rota'
+            : `Baixar parte ${next} de ${total} do mapa`;
 
   return (
     <View style={{ gap: 6 }}>
@@ -38,7 +40,7 @@ export function OfflineRouteButton({ route }: { route: Route }) {
         kind="secondary"
         icon={saved ? 'map-check' : 'download'}
         loading={mine !== null || !ready}
-        disabled={saved || active !== null}
+        disabled={saved || active !== null || deleting}
         onPress={() => void downloadNextPart(styles)}
       />
       {message ? <T variant="caption">{message}</T> : null}

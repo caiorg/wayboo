@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Bounds } from '../src/lib/offlineArea';
-import { downloadArea, listOfflineAreas, type DownloadResult } from '../src/lib/offlineMaps';
-import { downloadNextPart, prepareOfflineRoute, refreshSavedParts, useOfflineRoute } from '../src/lib/offlineRoute';
+import { deleteOfflineAreas, downloadArea, listOfflineAreas, type DownloadResult } from '../src/lib/offlineMaps';
+import { deleteOfflineMaps, downloadNextPart, prepareOfflineRoute, refreshSavedParts, useOfflineRoute } from '../src/lib/offlineRoute';
 
 const h = vi.hoisted(() => ({ parts: [] as Bounds[] }));
 
@@ -10,6 +10,7 @@ vi.mock('../src/lib/offlineMaps', () => ({
   offlineSupported: true,
   downloadArea: vi.fn(),
   listOfflineAreas: vi.fn(async () => []),
+  deleteOfflineAreas: vi.fn(async () => 0),
 }));
 
 const styles = ['https://s/light', 'https://s/dark'];
@@ -20,7 +21,7 @@ const b2: Bounds = [1, 0, 2, 1];
 beforeEach(() => {
   vi.clearAllMocks();
   h.parts = [b1, b2];
-  useOfflineRoute.setState({ key: null, routeId: null, styles: [], parts: [], done: [], ready: false, active: null, message: null });
+  useOfflineRoute.setState({ key: null, routeId: null, styles: [], parts: [], done: [], ready: false, active: null, deleting: false, message: null });
 });
 
 describe('download do mapa da rota', () => {
@@ -132,5 +133,34 @@ describe('download do mapa da rota', () => {
     expect(useOfflineRoute.getState().done).toEqual([1]);
     await refreshSavedParts();
     expect(useOfflineRoute.getState().done).toEqual([]);
+  });
+
+  it('não baixa enquanto apaga, e não apaga enquanto baixa', async () => {
+    let finishDelete!: (n: number) => void;
+    vi.mocked(deleteOfflineAreas).mockReturnValueOnce(new Promise((r) => (finishDelete = r)));
+    await prepareOfflineRoute(route, styles);
+    const deleting = deleteOfflineMaps();
+    expect(useOfflineRoute.getState().deleting).toBe(true);
+    await downloadNextPart(styles);
+    expect(downloadArea).not.toHaveBeenCalled();
+    finishDelete(2);
+    await expect(deleting).resolves.toEqual({ status: 'deleted', count: 2 });
+    expect(useOfflineRoute.getState().deleting).toBe(false);
+
+    let finishDownload!: (r: DownloadResult) => void;
+    vi.mocked(downloadArea).mockReturnValueOnce(new Promise((r) => (finishDownload = r)));
+    const downloading = downloadNextPart(styles);
+    await expect(deleteOfflineMaps()).resolves.toEqual({ status: 'busy' });
+    expect(deleteOfflineAreas).toHaveBeenCalledTimes(1);
+    finishDownload({ status: 'complete', bytes: 1 });
+    await downloading;
+  });
+
+  it('falha ao apagar libera o estado e relê as partes salvas', async () => {
+    vi.mocked(deleteOfflineAreas).mockRejectedValueOnce(new Error('disco'));
+    await prepareOfflineRoute(route, styles);
+    await expect(deleteOfflineMaps()).resolves.toEqual({ status: 'error' });
+    expect(useOfflineRoute.getState().deleting).toBe(false);
+    expect(listOfflineAreas).toHaveBeenCalledTimes(2);
   });
 });

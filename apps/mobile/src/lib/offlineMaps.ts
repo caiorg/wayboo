@@ -122,6 +122,8 @@ function follow(pack: OfflinePack, budget: Budget, onProgress: (status: OfflineP
       (_pack, error) => void finish({ error: error.message }, true),
     ).then(
       () => {
+        // Um evento que chegou antes de o listener ficar pronto já pode ter encerrado o download.
+        if (settled) return;
         // Depois do listener: o pacote pode ter terminado antes (recursos já salvos por outro pacote).
         void statusOf(pack).then(check);
         timer = setInterval(() => void statusOf(pack).then(check), POLL_MS);

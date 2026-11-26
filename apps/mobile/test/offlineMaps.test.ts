@@ -222,6 +222,24 @@ describe('downloadArea', () => {
     await expect(next).resolves.toMatchObject({ status: 'complete' });
   });
 
+  it('evento antes de o listener ficar pronto não deixa consulta periódica rodando', async () => {
+    vi.useFakeTimers();
+    try {
+      // O MapLibre entrega o evento final antes de a promessa de addListener resolver.
+      vi.mocked(OfflineManager.addListener).mockImplementationOnce(async (id, progress) => {
+        const pack = h.packs.find((p) => p.id === id)!;
+        pack.current = { ...pack.current!, state: 'complete', percentage: 100 };
+        progress(pack as never, pack.current as never);
+      });
+      const done = downloadArea({ styles: ['https://s/light'], bounds, meta: meta() }, () => {});
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(done).resolves.toMatchObject({ status: 'complete' });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('pacote que nunca fica ativo encerra com erro em vez de esperar para sempre', async () => {
     vi.useFakeTimers();
     try {

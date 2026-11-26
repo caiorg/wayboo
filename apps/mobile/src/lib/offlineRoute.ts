@@ -1,7 +1,7 @@
 import type { Route } from '@wayboo/core';
 import { create } from 'zustand';
 import { corridorDownloads, type Bounds } from './offlineArea';
-import { downloadArea, listOfflineAreas } from './offlineMaps';
+import { deleteOfflineAreas, downloadArea, listOfflineAreas } from './offlineMaps';
 
 interface OfflineRouteState {
   /** Rota e estilos das partes abaixo. */
@@ -19,6 +19,8 @@ interface OfflineRouteState {
    * requisições paralelas que os termos do OpenFreeMap limitam a 4.
    */
   active: { routeId: string; part: number; percentage: number } | null;
+  /** Exclusão em andamento: apagaria o pacote que um download novo tentasse retomar. */
+  deleting: boolean;
   message: string | null;
 }
 
@@ -30,6 +32,7 @@ export const useOfflineRoute = create<OfflineRouteState>(() => ({
   done: [],
   ready: false,
   active: null,
+  deleting: false,
   message: null,
 }));
 
@@ -56,10 +59,10 @@ export async function refreshSavedParts(): Promise<void> {
 
 /** Baixa a próxima parte pendente. Cada parte é um download que o usuário inicia, como os termos exigem. */
 export async function downloadNextPart(styles: string[]): Promise<void> {
-  const { key, routeId, parts, done, ready, active } = useOfflineRoute.getState();
+  const { key, routeId, parts, done, ready, active, deleting } = useOfflineRoute.getState();
   const index = parts.findIndex((_, i) => !done.includes(i + 1));
   const bounds = parts[index];
-  if (active || !ready || !routeId || key !== keyOf(routeId, styles) || !bounds) return;
+  if (active || deleting || !ready || !routeId || key !== keyOf(routeId, styles) || !bounds) return;
   const part = index + 1;
   const total = parts.length;
   const current = () => useOfflineRoute.getState().key === key;
@@ -85,4 +88,22 @@ export async function downloadNextPart(styles: string[]): Promise<void> {
         ? 'Mapa da rota salvo para usar sem rede.'
         : `Parte ${part} de ${total} salva. Toque para baixar a próxima.`;
   useOfflineRoute.setState({ done: nowDone, message });
+}
+
+export type DeleteResult = { status: 'deleted'; count: number } | { status: 'busy' } | { status: 'error' };
+
+/** Apaga os mapas salvos. Não começa com um download ativo, e nenhum download começa enquanto apaga. */
+export async function deleteOfflineMaps(): Promise<DeleteResult> {
+  const { active, deleting } = useOfflineRoute.getState();
+  if (active || deleting) return { status: 'busy' };
+  useOfflineRoute.setState({ deleting: true });
+  try {
+    return { status: 'deleted', count: await deleteOfflineAreas() };
+  } catch {
+    return { status: 'error' };
+  } finally {
+    useOfflineRoute.setState({ deleting: false });
+    // Também depois de uma falha no meio: o botão da rota volta a oferecer o que foi apagado.
+    await refreshSavedParts();
+  }
 }

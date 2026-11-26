@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
-import { deleteOfflineAreas, listOfflineAreas, offlineSupported } from '@/lib/offlineMaps';
-import { refreshSavedParts, useOfflineRoute } from '@/lib/offlineRoute';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { listOfflineAreas, offlineSupported } from '@/lib/offlineMaps';
+import { deleteOfflineMaps, useOfflineRoute } from '@/lib/offlineRoute';
+import { useMapStyles } from '@/lib/theme';
 import { Button, Card, T } from './ui';
 
 /** Partes de rota salvas no aparelho, com a opção de apagar. Só no app nativo. */
@@ -18,6 +19,8 @@ function OfflineMapsCardBody() {
   const [msg, setMsg] = useState<string | null>(null);
   // Apagar no meio de um download deixaria o pacote em andamento sem dono.
   const downloading = useOfflineRoute((s) => s.active !== null);
+  const { light, dark } = useMapStyles();
+  const styles = useMemo(() => [...new Set([light, dark])], [light, dark]);
 
   // Só a leitura mais recente vale: uma anterior que demorou não sobrescreve o resultado novo.
   const loadGen = useRef(0);
@@ -26,10 +29,13 @@ function OfflineMapsCardBody() {
     try {
       const areas = await listOfflineAreas();
       if (gen !== loadGen.current) return;
-      // Um pacote por estilo: a parte conta uma vez, e só se todos os estilos dela terminaram.
+      // Um pacote por estilo: a parte conta uma vez, e só com pacote completo em cada estilo do servidor atual.
+      // Sem o escuro, o mapa some sem rede quando o tema troca.
       const key = (a: (typeof areas)[number]) => `${a.meta.routeId} ${a.meta.part}`;
-      const incomplete = new Set(areas.filter((a) => !a.complete).map(key));
-      setParts(new Set(areas.map(key).filter((k) => !incomplete.has(k))).size);
+      const saved = [...new Set(areas.map(key))].filter((k) =>
+        styles.every((style) => areas.some((a) => key(a) === k && a.meta.style === style && a.complete)),
+      );
+      setParts(saved.length);
       setPacks(areas.length);
     } catch {
       if (gen !== loadGen.current) return;
@@ -42,7 +48,7 @@ function OfflineMapsCardBody() {
   // Relê ao abrir e quando um download termina: a parte nova entra na contagem.
   useEffect(() => {
     if (!downloading) void load();
-  }, [downloading]);
+  }, [downloading, styles]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const remove = async () => {
     if (state !== 'confirm') {
@@ -51,14 +57,16 @@ function OfflineMapsCardBody() {
       return;
     }
     setState('deleting');
-    try {
-      const n = await deleteOfflineAreas();
-      setMsg(n ? 'Mapas offline apagados.' : 'Não havia mapas salvos.');
-    } catch {
-      setMsg('Não foi possível apagar os mapas salvos.');
-    }
-    // Também depois de uma falha no meio: o botão da rota volta a oferecer o que foi apagado.
-    void refreshSavedParts();
+    const result = await deleteOfflineMaps();
+    setMsg(
+      result.status === 'deleted'
+        ? result.count
+          ? 'Mapas offline apagados.'
+          : 'Não havia mapas salvos.'
+        : result.status === 'busy'
+          ? 'Espere o download em andamento terminar para apagar.'
+          : 'Não foi possível apagar os mapas salvos.',
+    );
     setState('idle');
     void load();
   };
