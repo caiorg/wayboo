@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { deleteOfflineAreas, listOfflineAreas, offlineSupported } from '@/lib/offlineMaps';
 import { refreshSavedParts, useOfflineRoute } from '@/lib/offlineRoute';
 import { Button, Card, T } from './ui';
@@ -19,24 +19,30 @@ function OfflineMapsCardBody() {
   // Apagar no meio de um download deixaria o pacote em andamento sem dono.
   const downloading = useOfflineRoute((s) => s.active !== null);
 
+  // Só a leitura mais recente vale: uma anterior que demorou não sobrescreve o resultado novo.
+  const loadGen = useRef(0);
   const load = async () => {
+    const gen = ++loadGen.current;
     try {
       const areas = await listOfflineAreas();
+      if (gen !== loadGen.current) return;
       // Um pacote por estilo: a parte conta uma vez, e só se todos os estilos dela terminaram.
       const key = (a: (typeof areas)[number]) => `${a.meta.routeId} ${a.meta.part}`;
       const incomplete = new Set(areas.filter((a) => !a.complete).map(key));
       setParts(new Set(areas.map(key).filter((k) => !incomplete.has(k))).size);
       setPacks(areas.length);
     } catch {
+      if (gen !== loadGen.current) return;
       setParts(0);
       setPacks(0);
       setMsg('Não foi possível ler os mapas salvos.');
     }
   };
 
+  // Relê ao abrir e quando um download termina: a parte nova entra na contagem.
   useEffect(() => {
-    void load();
-  }, []);
+    if (!downloading) void load();
+  }, [downloading]);
 
   const remove = async () => {
     if (state !== 'confirm') {
@@ -48,11 +54,11 @@ function OfflineMapsCardBody() {
     try {
       const n = await deleteOfflineAreas();
       setMsg(n ? 'Mapas offline apagados.' : 'Não havia mapas salvos.');
-      // O botão da rota volta a oferecer o download.
-      void refreshSavedParts();
     } catch {
       setMsg('Não foi possível apagar os mapas salvos.');
     }
+    // Também depois de uma falha no meio: o botão da rota volta a oferecer o que foi apagado.
+    void refreshSavedParts();
     setState('idle');
     void load();
   };

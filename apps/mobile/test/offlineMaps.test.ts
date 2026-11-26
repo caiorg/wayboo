@@ -188,8 +188,31 @@ describe('downloadArea', () => {
     await settle();
     h.packs[0]!.pause.mockRejectedValueOnce(new Error('falhou'));
     await emit({ completedResourceSize: STOP_AT_BYTES });
-    await expect(done).resolves.toMatchObject({ status: 'partial' });
+    // Sem pacote não há parte salva: o resultado é erro, e a parte segue pendente.
+    await expect(done).resolves.toMatchObject({ status: 'error' });
     expect(OfflineManager.deletePack).toHaveBeenCalledWith('p1');
+  });
+
+  it('pacote que nunca fica ativo encerra com erro em vez de esperar para sempre', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(OfflineManager.createPack).mockImplementationOnce(async (opts) => {
+        const pack = makePack(opts.metadata as Record<string, unknown>, bounds, 'inactive');
+        h.packs.push(pack);
+        return pack as never;
+      });
+      const done = downloadArea({ styles: ['https://s/light'], bounds, meta: meta() }, () => {});
+      await vi.advanceTimersByTimeAsync(9_000);
+      let settled = false;
+      void done.then(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(4_000);
+      await expect(done).resolves.toEqual({ status: 'error', message: 'O download não começou.' });
+      expect(h.listeners.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('falha ao criar o pacote vira erro, sem exceção', async () => {

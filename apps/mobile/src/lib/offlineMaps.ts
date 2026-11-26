@@ -29,6 +29,11 @@ export const offlineSupported = true;
 
 /** Rede de segurança: um evento perdido não deixa o download pendurado. */
 const POLL_MS = 2000;
+/**
+ * Pacote que segue inativo sem nunca ter ficado ativo: um erro chegou antes do listener e o MapLibre não o repete.
+ * O `createPack` e o `resume` ativam o pacote na hora, então 10 s inativo é falha, não lentidão.
+ */
+const NEVER_STARTED_MS = 10_000;
 
 function isOurs(metadata: Record<string, unknown>): metadata is OfflineMeta & { style: string } {
   return metadata.app === 'wayboo' && typeof metadata.routeId === 'string' && typeof metadata.part === 'number' && typeof metadata.style === 'string';
@@ -46,13 +51,15 @@ type Followed = { verdict: 'complete' | 'limit'; bytes: number } | { error: stri
 
 /**
  * Para o pacote. Se a pausa falhar, apaga: um pacote solto continuaria baixando além do limite e em paralelo
- * com o próximo download.
+ * com o próximo download. Devolve false quando o pacote não ficou salvo.
  */
-async function halt(pack: OfflinePack): Promise<void> {
+async function halt(pack: OfflinePack): Promise<boolean> {
   try {
     await pack.pause();
+    return true;
   } catch {
     await OfflineManager.deletePack(pack.id).catch(() => {});
+    return false;
   }
 }
 
@@ -61,14 +68,15 @@ function follow(pack: OfflinePack, budget: Budget, onProgress: (status: OfflineP
   return new Promise((resolve) => {
     let settled = false;
     let sawActive = false;
+    let inactiveSince: number | null = null;
     let timer: ReturnType<typeof setInterval> | undefined;
     const finish = async (result: Followed, stop: boolean) => {
       if (settled) return;
       settled = true;
       clearInterval(timer);
       OfflineManager.removeListener(pack.id);
-      if (stop) await halt(pack);
-      resolve(result);
+      const kept = stop ? await halt(pack) : true;
+      resolve(kept || 'error' in result ? result : { error: 'Não foi possível pausar o download; a parte foi descartada.' });
     };
     const check = (status: OfflinePackStatus | null) => {
       if (settled) return;
@@ -82,6 +90,15 @@ function follow(pack: OfflinePack, budget: Budget, onProgress: (status: OfflineP
       if (status.state === 'inactive' && sawActive) {
         void finish({ error: 'Download interrompido.' }, false);
         return;
+      }
+      if (status.state === 'inactive') {
+        inactiveSince ??= Date.now();
+        if (Date.now() - inactiveSince >= NEVER_STARTED_MS) {
+          void finish({ error: 'O download não começou.' }, true);
+          return;
+        }
+      } else {
+        inactiveSince = null;
       }
       const verdict = judgeProgress(status, budget);
       if (verdict !== 'downloading') void finish({ verdict, bytes: countedBytes(status, budget.reusesTiles) }, verdict === 'limit');
