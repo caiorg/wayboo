@@ -534,4 +534,31 @@ describe('navegação sem rede', () => {
       vi.useRealTimers();
     }
   });
+
+  it('viagem criada por uma navegação já encerrada não entra na navegação nova', async () => {
+    let first!: (r: { tripId: string }) => void;
+    vi.mocked(api.startTrip).mockReturnValueOnce(new Promise((r) => (first = r)));
+    vi.mocked(api.startTrip).mockResolvedValueOnce({ tripId: 't2' });
+    const starting = startNavigation(plan, 0, false);
+    await stopNavigation();
+    await startNavigation(plan, 0, false);
+    first({ tripId: 't-old' });
+    await starting;
+    await settle();
+    expect(useNavSession.getState().tripId).toBe('t2');
+    expect(JSON.parse(mocks.async.get(TRIP_KEY)!).tripId).toBe('t2');
+    // A viagem órfã é encerrada: sem amostras, o servidor a descarta.
+    expect(api.finishTrip).toHaveBeenCalledWith('t-old');
+  });
+
+  it('falha de startTrip de uma navegação encerrada não aparece na nova', async () => {
+    let fail!: (e: Error) => void;
+    vi.mocked(api.startTrip).mockReturnValueOnce(new Promise((_, r) => (fail = r)));
+    const starting = startNavigation(plan, 0, false);
+    await stopNavigation();
+    await startNavigation(plan, 0, false);
+    fail(new Error('Viagem não registrada'));
+    await starting;
+    expect(useNavSession.getState()).toMatchObject({ tripId: 't1', error: null });
+  });
 });

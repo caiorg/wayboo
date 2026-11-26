@@ -336,11 +336,18 @@ export async function startNavigation(plan: PlanResponse, routeIndex: number, si
   }
 
   void persistTrip();
+  const gen = sessionGen;
   try {
     const { tripId } = await api.startTrip(plan.planId, routeIndex);
+    if (gen !== sessionGen) {
+      // A navegação acabou antes da resposta. Sem amostras, o servidor descarta a viagem ao encerrá-la.
+      void api.finishTrip(tripId).catch(() => {});
+      return;
+    }
     useNavSession.setState({ tripId });
     void persistTrip();
   } catch (e) {
+    if (gen !== sessionGen) return;
     // Sem servidor a navegação continua; só não haverá aprendizado desta viagem.
     useNavSession.setState({ error: e instanceof Error ? e.message : 'Viagem não registrada' });
   }
