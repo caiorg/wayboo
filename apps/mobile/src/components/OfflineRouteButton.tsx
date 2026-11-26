@@ -10,7 +10,7 @@ import { Button, T } from './ui';
 export function OfflineRouteButton({ route }: { route: Route }) {
   const { light, dark } = useMapStyles();
   const styles = useMemo(() => [...new Set([light, dark])], [light, dark]);
-  const { routeId, parts, done, ready, active, deleting, message } = useOfflineRoute();
+  const { routeId, parts, done, limited, ready, active, deleting, message } = useOfflineRoute();
 
   useEffect(() => {
     if (offlineSupported) void prepareOfflineRoute(route, styles);
@@ -18,8 +18,9 @@ export function OfflineRouteButton({ route }: { route: Route }) {
 
   if (!offlineSupported || routeId !== route.id || parts.length === 0) return null;
   const total = parts.length;
-  const saved = done.length === total;
-  const next = parts.findIndex((_, i) => !done.includes(i + 1)) + 1;
+  // Nada mais a baixar: tudo salvo, ou parado no limite de 50 MB.
+  const settled = done.length + limited.length === total;
+  const next = parts.findIndex((_, i) => !done.includes(i + 1) && !limited.includes(i + 1)) + 1;
   const mine = active?.routeId === route.id ? active : null;
   const label = mine
     ? `Baixando parte ${mine.part} de ${total} · ${mine.percentage}%`
@@ -27,8 +28,10 @@ export function OfflineRouteButton({ route }: { route: Route }) {
       ? 'Outro mapa está sendo baixado'
       : deleting
         ? 'Apagando mapas salvos'
-        : saved
-          ? 'Mapa da rota salvo'
+        : settled
+          ? limited.length
+            ? 'Mapa da rota salvo em parte'
+            : 'Mapa da rota salvo'
           : total === 1
             ? 'Baixar mapa da rota'
             : `Baixar parte ${next} de ${total} do mapa`;
@@ -38,9 +41,9 @@ export function OfflineRouteButton({ route }: { route: Route }) {
       <Button
         label={label}
         kind="secondary"
-        icon={saved ? 'map-check' : 'download'}
+        icon={settled ? 'map-check' : 'download'}
         loading={mine !== null || !ready}
-        disabled={saved || active !== null || deleting}
+        disabled={settled || active !== null || deleting}
         onPress={() => void downloadNextPart(styles)}
       />
       {message ? <T variant="caption">{message}</T> : null}

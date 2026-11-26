@@ -21,7 +21,7 @@ const b2: Bounds = [1, 0, 2, 1];
 beforeEach(() => {
   vi.clearAllMocks();
   h.parts = [b1, b2];
-  useOfflineRoute.setState({ key: null, routeId: null, styles: [], parts: [], done: [], ready: false, active: null, deleting: false, message: null });
+  useOfflineRoute.setState({ key: null, routeId: null, styles: [], parts: [], done: [], limited: [], ready: false, active: null, deleting: false, message: null });
 });
 
 describe('download do mapa da rota', () => {
@@ -76,15 +76,25 @@ describe('download do mapa da rota', () => {
     await done;
   });
 
-  it('parte cortada pelo limite conta como salva e avisa', async () => {
+  it('parte cortada pelo limite não conta como salva, mas o próximo toque segue para a parte seguinte', async () => {
     vi.mocked(downloadArea).mockResolvedValueOnce({ status: 'partial', bytes: 46_000_000 });
-    h.parts = [b1];
+    vi.mocked(downloadArea).mockResolvedValueOnce({ status: 'complete', bytes: 1 });
     await prepareOfflineRoute(route, styles);
     await downloadNextPart(styles);
     expect(useOfflineRoute.getState()).toMatchObject({
-      done: [1],
-      message: 'Parte 1 de 1 parou no limite de 50 MB. Sem rede, parte da área pode faltar.',
+      done: [],
+      limited: [1],
+      message: 'Parte 1 de 2 parou no limite de 50 MB. Sem rede, parte da área pode faltar.',
     });
+    await downloadNextPart(styles);
+    expect(vi.mocked(downloadArea).mock.calls[1]![0].bounds).toEqual(b2);
+    expect(useOfflineRoute.getState()).toMatchObject({
+      done: [2],
+      limited: [1],
+      message: 'Mapa da rota salvo, com partes incompletas.',
+    });
+    await downloadNextPart(styles);
+    expect(downloadArea).toHaveBeenCalledTimes(2);
   });
 
   it('erro deixa a parte pendente para tentar de novo', async () => {
@@ -154,6 +164,20 @@ describe('download do mapa da rota', () => {
     expect(deleteOfflineAreas).toHaveBeenCalledTimes(1);
     finishDownload({ status: 'complete', bytes: 1 });
     await downloading;
+  });
+
+  it('segue apagando até terminar de reler as partes salvas', async () => {
+    await prepareOfflineRoute(route, styles);
+    let reread!: (a: Awaited<ReturnType<typeof listOfflineAreas>>) => void;
+    vi.mocked(listOfflineAreas).mockReturnValueOnce(new Promise((r) => (reread = r)));
+    const deleting = deleteOfflineMaps();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(useOfflineRoute.getState().deleting).toBe(true);
+    await downloadNextPart(styles);
+    expect(downloadArea).not.toHaveBeenCalled();
+    reread([]);
+    await deleting;
+    expect(useOfflineRoute.getState().deleting).toBe(false);
   });
 
   it('falha ao apagar libera o estado e relê as partes salvas', async () => {

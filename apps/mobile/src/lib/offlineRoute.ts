@@ -12,6 +12,11 @@ interface OfflineRouteState {
   parts: Bounds[];
   /** Partes já salvas, numeradas a partir de 1. */
   done: number[];
+  /**
+   * Partes que pararam no limite de 50 MB, com área ou estilo faltando. Não contam como salvas, mas o próximo toque
+   * passa para a parte seguinte: baixar de novo não traria mais nada dentro do limite.
+   */
+  limited: number[];
   /** False até ler do aparelho quais partes já estão salvas. */
   ready: boolean;
   /**
@@ -30,6 +35,7 @@ export const useOfflineRoute = create<OfflineRouteState>(() => ({
   styles: [],
   parts: [],
   done: [],
+  limited: [],
   ready: false,
   active: null,
   deleting: false,
@@ -42,7 +48,7 @@ const keyOf = (routeId: string, styles: string[]) => `${routeId} ${styles.join('
 export async function prepareOfflineRoute(route: Pick<Route, 'id' | 'geometry'>, styles: string[]): Promise<void> {
   const key = keyOf(route.id, styles);
   if (useOfflineRoute.getState().key === key) return;
-  useOfflineRoute.setState({ key, routeId: route.id, styles, parts: corridorDownloads(route.geometry), done: [], ready: false, message: null });
+  useOfflineRoute.setState({ key, routeId: route.id, styles, parts: corridorDownloads(route.geometry), done: [], limited: [], ready: false, message: null });
   await refreshSavedParts();
 }
 
@@ -54,13 +60,13 @@ export async function refreshSavedParts(): Promise<void> {
   const done = parts
     .map((_, i) => i + 1)
     .filter((part) => styles.every((style) => areas.some((a) => a.complete && a.meta.routeId === routeId && a.meta.part === part && a.meta.style === style)));
-  if (useOfflineRoute.getState().key === key) useOfflineRoute.setState({ done, ready: true });
+  if (useOfflineRoute.getState().key === key) useOfflineRoute.setState({ done, limited: [], ready: true });
 }
 
 /** Baixa a próxima parte pendente. Cada parte é um download que o usuário inicia, como os termos exigem. */
 export async function downloadNextPart(styles: string[]): Promise<void> {
-  const { key, routeId, parts, done, ready, active, deleting } = useOfflineRoute.getState();
-  const index = parts.findIndex((_, i) => !done.includes(i + 1));
+  const { key, routeId, parts, done, limited, ready, active, deleting } = useOfflineRoute.getState();
+  const index = parts.findIndex((_, i) => !done.includes(i + 1) && !limited.includes(i + 1));
   const bounds = parts[index];
   if (active || deleting || !ready || !routeId || key !== keyOf(routeId, styles) || !bounds) return;
   const part = index + 1;
@@ -80,14 +86,19 @@ export async function downloadNextPart(styles: string[]): Promise<void> {
     useOfflineRoute.setState({ message: `Falha ao baixar o mapa: ${result.message}` });
     return;
   }
-  const nowDone = [...new Set([...useOfflineRoute.getState().done, part])].sort((a, b) => a - b);
+  const add = (list: number[]) => [...new Set([...list, part])].sort((a, b) => a - b);
+  const state = useOfflineRoute.getState();
+  const nowDone = result.status === 'complete' ? add(state.done) : state.done;
+  const nowLimited = result.status === 'partial' ? add(state.limited) : state.limited;
   const message =
     result.status === 'partial'
       ? `Parte ${part} de ${total} parou no limite de 50 MB. Sem rede, parte da área pode faltar.`
-      : nowDone.length === total
-        ? 'Mapa da rota salvo para usar sem rede.'
-        : `Parte ${part} de ${total} salva. Toque para baixar a próxima.`;
-  useOfflineRoute.setState({ done: nowDone, message });
+      : nowDone.length + nowLimited.length < total
+        ? `Parte ${part} de ${total} salva. Toque para baixar a próxima.`
+        : nowLimited.length
+          ? 'Mapa da rota salvo, com partes incompletas.'
+          : 'Mapa da rota salvo para usar sem rede.';
+  useOfflineRoute.setState({ done: nowDone, limited: nowLimited, message });
 }
 
 export type DeleteResult = { status: 'deleted'; count: number } | { status: 'busy' } | { status: 'error' };
@@ -102,8 +113,9 @@ export async function deleteOfflineMaps(): Promise<DeleteResult> {
   } catch {
     return { status: 'error' };
   } finally {
-    useOfflineRoute.setState({ deleting: false });
-    // Também depois de uma falha no meio: o botão da rota volta a oferecer o que foi apagado.
+    // Também depois de uma falha no meio: o botão da rota volta a oferecer o que foi apagado. Segue em `deleting`
+    // até a releitura acabar, senão um download que começasse no meio teria a parte nova sobrescrita por ela.
     await refreshSavedParts();
+    useOfflineRoute.setState({ deleting: false });
   }
 }
