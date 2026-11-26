@@ -63,19 +63,28 @@ const dark: Theme = {
   mapStyle: 'https://tiles.openfreemap.org/styles/dark',
 };
 
+/** Estilos claro e escuro do mapa no servidor atual: os do self-host, se ele anunciou, ou os públicos. */
+export function useMapStyles(): { light: string; dark: string } {
+  const apiUrl = useSettings((s) => s.apiUrl);
+  const serverMap = useSettings((s) => s.serverMap);
+  return useMemo(() => {
+    // Estilo gravado de outro servidor não vale para o atual.
+    if (!serverMap || serverMap.apiUrl !== normalizeApiUrl(apiUrl)) return { light: light.mapStyle, dark: dark.mapStyle };
+    return { light: serverMap.light, dark: serverMap.dark };
+  }, [apiUrl, serverMap]);
+}
+
 export function useTheme(): Theme {
   const system = useColorScheme();
   const pref = useSettings((s) => s.theme);
-  const apiUrl = useSettings((s) => s.apiUrl);
-  const serverMap = useSettings((s) => s.serverMap);
+  const styles = useMapStyles();
   const isDark = pref === 'system' ? system === 'dark' : pref === 'dark';
   // Memo: o tema entra em dependências de efeitos e memos do mapa.
   return useMemo(() => {
     const base = isDark ? dark : light;
-    // Estilo gravado de outro servidor não vale para o atual.
-    if (!serverMap || serverMap.apiUrl !== normalizeApiUrl(apiUrl)) return base;
-    return { ...base, mapStyle: isDark ? serverMap.dark : serverMap.light };
-  }, [isDark, apiUrl, serverMap]);
+    const mapStyle = isDark ? styles.dark : styles.light;
+    return mapStyle === base.mapStyle ? base : { ...base, mapStyle };
+  }, [isDark, styles]);
 }
 
 export const ALERT_COLORS: Record<string, string> = {
