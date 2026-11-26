@@ -5,6 +5,7 @@ import { buildApp } from '../src/app';
 import { config } from '../src/config';
 import { db, getPlaces, getRoutineRoutes, newPlace, saveRoutine, saveRoutineRoutes, upsertPlace } from '../src/db';
 import { currentWeather } from '../src/providers/geo-services';
+import { encodePolyline } from './helpers';
 
 // Espião em `getPlaces` para saber quando um pedido de `/suggestions` chegou a `routinePlan` (ver `concurrently`).
 vi.mock('../src/db', async (importOriginal) => {
@@ -22,30 +23,6 @@ const TZ = 'America/Sao_Paulo';
 const WEDNESDAY_3PM = new Date('2026-11-18T15:00:00-03:00');
 const HOME: Coord = [-46.65, -23.56];
 const WORK: Coord = [-46.62, -23.59];
-
-/** Polyline com precisão 6, o formato que o Valhalla devolve em `shape`. */
-function encodePolyline(coords: Coord[]): string {
-  let out = '';
-  let prevLat = 0;
-  let prevLon = 0;
-  const enc = (v: number) => {
-    let n = v < 0 ? ~(v << 1) : v << 1;
-    while (n >= 0x20) {
-      out += String.fromCharCode((0x20 | (n & 0x1f)) + 63);
-      n >>= 5;
-    }
-    out += String.fromCharCode(n + 63);
-  };
-  for (const [lon, lat] of coords) {
-    const la = Math.round(lat * 1e6);
-    const lo = Math.round(lon * 1e6);
-    enc(la - prevLat);
-    enc(lo - prevLon);
-    prevLat = la;
-    prevLon = lo;
-  }
-  return out;
-}
 
 const n = 40;
 const shape = Array.from({ length: n + 1 }, (_, i): Coord => [HOME[0] + ((WORK[0] - HOME[0]) * i) / n, HOME[1] + ((WORK[1] - HOME[1]) * i) / n]);

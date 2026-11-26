@@ -2,6 +2,7 @@ export * from './geo';
 export * from './types';
 export * from './route';
 export * from './instructions';
+export * from './lanes';
 export * from './navigation';
 export * from './simulate';
 export * from './api';
