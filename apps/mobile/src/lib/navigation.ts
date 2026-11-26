@@ -17,6 +17,7 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import * as Speech from 'expo-speech';
 import { create } from 'zustand';
 import { api } from './api';
+import { BACKGROUND_LOCATION_SUPPORTED, startBackgroundLocation, stopBackgroundLocation } from './backgroundLocation';
 import { useLocationStore } from './location';
 import { useSettings } from './store';
 
@@ -54,14 +55,28 @@ export const useNavSession = create<NavSession>(() => ({
 const KEEP_AWAKE_TAG = 'wayboo-nav';
 const SIM_SPEEDUP = 6;
 const FLUSH_EVERY_MS = 15_000;
+/** Limite de `SamplesSchema` na API. */
+const MAX_SAMPLES_PER_POST = 2000;
+const BACKGROUND_UNAVAILABLE = 'Com a tela bloqueada, a navegação pausa neste aparelho.';
 
 let navigator: Navigator | null = null;
 let unsubscribe: (() => void) | null = null;
 let simTimer: ReturnType<typeof setInterval> | null = null;
 let flushTimer: ReturnType<typeof setInterval> | null = null;
-let buffer: TraceSample[] = [];
+/** Rastro de uma viagem. Cada navegação tem o seu: um envio atrasado de outra viagem não mistura amostras. */
+interface Trace {
+  tripId: string | null;
+  samples: TraceSample[];
+  sending: Promise<void> | null;
+  lastSentAt: number;
+}
+
+const newTrace = (): Trace => ({ tripId: null, samples: [], sending: null, lastSentAt: Date.now() });
+let trace = newTrace();
 let lastRerouteAt = 0;
 let finishing = false;
+/** Sobe a cada início e fim: uma resposta assíncrona de uma navegação que já acabou é descartada. */
+let sessionGen = 0;
 let keepAwakeActive = false;
 let keepAwakeQueue: Promise<void> = Promise.resolve();
 
@@ -178,20 +193,32 @@ function speak(text: string) {
   });
 }
 
-async function flush() {
-  const { tripId } = useNavSession.getState();
-  if (!tripId || buffer.length === 0) return;
-  const batch = buffer;
-  buffer = [];
-  try {
-    await api.samples(tripId, batch);
-  } catch {
-    // Sem rede: devolve ao buffer para a próxima tentativa (limite para não crescer sem fim).
-    buffer = [...batch, ...buffer].slice(-5000);
+/** Um envio por vez em cada viagem. Quem chama durante um envio espera o mesmo, que segue até o rastro esvaziar. */
+function flush(t: Trace = trace): Promise<void> {
+  t.sending ??= send(t).finally(() => {
+    t.sending = null;
+  });
+  return t.sending;
+}
+
+async function send(t: Trace) {
+  t.lastSentAt = Date.now();
+  while (t.tripId && t.samples.length > 0) {
+    const batch = t.samples.slice(0, MAX_SAMPLES_PER_POST);
+    t.samples = t.samples.slice(batch.length);
+    try {
+      await api.samples(t.tripId, batch);
+    } catch {
+      // Sem rede: devolve ao buffer para a próxima tentativa (limite para não crescer sem fim).
+      t.samples = [...batch, ...t.samples].slice(-5000);
+      return;
+    }
   }
 }
 
 function cleanup() {
+  sessionGen++;
+  void stopBackgroundLocation();
   unsubscribe?.();
   unsubscribe = null;
   if (simTimer) clearInterval(simTimer);
@@ -229,7 +256,11 @@ function onFix(fix: NavFix) {
   const stops = markVisitedStops(s.stops, fix, { alongM: st.alongM, project: navigator.project, lastWithin: navigator.lastWithin });
   useNavSession.setState(stops === s.stops ? { nav: st } : { nav: st, stops });
   if (st.announcement) speak(st.announcement);
-  if (!s.simulated) buffer.push({ t: fix.t, lat: fix.lat, lon: fix.lon, speed: fix.speed ?? null, heading: fix.heading ?? null, accuracy: fix.accuracy ?? null });
+  if (!s.simulated) {
+    trace.samples.push({ t: fix.t, lat: fix.lat, lon: fix.lon, speed: fix.speed ?? null, heading: fix.heading ?? null, accuracy: fix.accuracy ?? null });
+    // O Android pausa os timers do JS com o app em segundo plano; os fixes da task continuam chegando.
+    if (Date.now() - trace.lastSentAt >= FLUSH_EVERY_MS) void flush();
+  }
   if (st.arrived) {
     void stopNavigation();
     return;
@@ -240,7 +271,7 @@ function onFix(fix: NavFix) {
 export async function startNavigation(plan: PlanResponse, routeIndex: number, simulate: boolean): Promise<void> {
   cleanup();
   finishing = false;
-  buffer = [];
+  const t = (trace = newTrace());
   const chosen = plan.routes[routeIndex];
   if (!chosen) return;
   // Vozes podem ter sido instaladas desde a última navegação; já começa a buscar para a primeira fala.
@@ -260,12 +291,13 @@ export async function startNavigation(plan: PlanResponse, routeIndex: number, si
     error: null,
   });
   acquireKeepAwake();
+  const gen = sessionGen;
 
   if (simulate) {
     // Simulação não grava viagem: o tempo é acelerado e ensinaria durações falsas ao modelo.
-    const gen = simulateDrive(chosen.route, chosen.eta.segmentDurationsS, Date.now(), 1, 3);
+    const drive = simulateDrive(chosen.route, chosen.eta.segmentDurationsS, Date.now(), 1, 3);
     simTimer = setInterval(() => {
-      const next = gen.next();
+      const next = drive.next();
       if (next.done) {
         void stopNavigation();
         return;
@@ -276,14 +308,26 @@ export async function startNavigation(plan: PlanResponse, routeIndex: number, si
     return;
   }
 
+  // Inicia já, com o app na tela: o Android recusa o serviço em primeiro plano depois que o app sai dela.
+  if (BACKGROUND_LOCATION_SUPPORTED && useSettings.getState().backgroundNav) {
+    void startBackgroundLocation(plan.destinationName).then((ok) => {
+      if (!ok && gen === sessionGen && !useNavSession.getState().error) useNavSession.setState({ error: BACKGROUND_UNAVAILABLE });
+    });
+  }
+
   try {
     const { tripId } = await api.startTrip(plan.planId, routeIndex);
+    // Encerrada durante o startTrip: a resposta não pode mexer na sessão seguinte.
+    if (gen !== sessionGen) return;
+    t.tripId = tripId;
     useNavSession.setState({ tripId });
   } catch (e) {
+    if (gen !== sessionGen) return;
     // Sem servidor a navegação continua; só não haverá aprendizado desta viagem.
     useNavSession.setState({ error: e instanceof Error ? e.message : 'Viagem não registrada' });
   }
-  flushTimer = setInterval(() => void flush(), FLUSH_EVERY_MS);
+  t.lastSentAt = Date.now();
+  flushTimer = setInterval(() => void flush(t), FLUSH_EVERY_MS);
   unsubscribe = useLocationStore.subscribe((state, prev) => {
     if (state.fix && state.fix !== prev.fix) onFix(state.fix);
   });
@@ -295,12 +339,13 @@ export async function stopNavigation(): Promise<void> {
   if (finishing) return;
   finishing = true;
   const { tripId, simulated, nav } = useNavSession.getState();
+  const t = trace;
   cleanup();
   if (simulated || !tripId) {
     useNavSession.setState({ status: nav?.arrived ? 'arrived' : 'idle', result: null });
     return;
   }
-  await flush();
+  await flush(t);
   try {
     const result = await api.finishTrip(tripId);
     useNavSession.setState({ status: 'arrived', result });

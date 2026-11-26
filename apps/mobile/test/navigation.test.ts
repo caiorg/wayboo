@@ -4,9 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as Speech from 'expo-speech';
 import { pickVoice, startNavigation, stopNavigation, toggleMute, useNavSession, type VoiceInfo } from '../src/lib/navigation';
 import { useLocationStore } from '../src/lib/location';
+import { startBackgroundLocation, stopBackgroundLocation } from '../src/lib/backgroundLocation';
+import { api } from '../src/lib/api';
 import { useSettings } from '../src/lib/store';
 
-const mocks = vi.hoisted(() => ({ announcement: null as string | null }));
+const mocks = vi.hoisted(() => ({ announcement: null as string | null, bgSupported: true }));
 
 // Imita o expo-keep-awake da web: desativar uma tag inativa lança erro.
 const active = new Set<string>();
@@ -44,11 +46,19 @@ vi.mock('../src/lib/location', async () => {
 });
 vi.mock('../src/lib/store', async () => {
   const { create } = await import('zustand');
-  return { useSettings: create(() => ({ voice: false, avoidTolls: false, avoidHighways: false })) };
+  return { useSettings: create(() => ({ voice: false, avoidTolls: false, avoidHighways: false, backgroundNav: true })) };
 });
+vi.mock('../src/lib/backgroundLocation', () => ({
+  get BACKGROUND_LOCATION_SUPPORTED() {
+    return mocks.bgSupported;
+  },
+  startBackgroundLocation: vi.fn(async () => true),
+  stopBackgroundLocation: vi.fn(async () => {}),
+}));
 
 const plan = {
   planId: 'p1',
+  destinationName: 'Av. Paulista, 1000',
   waypoints: [],
   routes: [{ route: {}, eta: { segmentDurationsS: [] } }],
 } as unknown as PlanResponse;
@@ -61,7 +71,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   active.clear();
   mocks.announcement = null;
-  useSettings.setState({ voice: false });
+  mocks.bgSupported = true;
+  useSettings.setState({ voice: false, backgroundNav: true });
   useNavSession.setState({ muted: false });
   useLocationStore.setState({ fix: null });
 });
@@ -293,5 +304,196 @@ describe('voz da navegação', () => {
     useLocationStore.setState({ fix: { ...fix, t: 2 } });
     await settle();
     expect(Speech.speak).toHaveBeenCalledWith('Vire à esquerda', { language: 'pt-BR', voice: 'Luciana', rate: 1.02 });
+  });
+});
+
+describe('navegação com a tela bloqueada', () => {
+  const startBg = vi.mocked(startBackgroundLocation);
+  const stopBg = vi.mocked(stopBackgroundLocation);
+
+  it('na navegação real, inicia a localização em segundo plano com o destino', async () => {
+    await startNavigation(plan, 0, false);
+    expect(startBg).toHaveBeenCalledWith('Av. Paulista, 1000');
+  });
+
+  it('na simulação, não usa localização em segundo plano', async () => {
+    await startNavigation(plan, 0, true);
+    expect(startBg).not.toHaveBeenCalled();
+  });
+
+  it('com a chave desligada em Ajustes, não inicia', async () => {
+    useSettings.setState({ backgroundNav: false });
+    await startNavigation(plan, 0, false);
+    expect(startBg).not.toHaveBeenCalled();
+  });
+
+  it('para a localização em segundo plano ao encerrar', async () => {
+    await startNavigation(plan, 0, false);
+    stopBg.mockClear();
+    await stopNavigation();
+    expect(stopBg).toHaveBeenCalledTimes(1);
+  });
+
+  it('quando o sistema recusa, segue navegando e avisa que a tela precisa ficar ligada', async () => {
+    startBg.mockResolvedValueOnce(false);
+    await startNavigation(plan, 0, false);
+    await settle();
+    const s = useNavSession.getState();
+    expect(s.status).toBe('navigating');
+    expect(s.error).toBe('Com a tela bloqueada, a navegação pausa neste aparelho.');
+  });
+
+  it('a recusa que chega depois de encerrar não vira aviso na próxima sessão', async () => {
+    let resolve!: (ok: boolean) => void;
+    startBg.mockReturnValueOnce(new Promise((r) => (resolve = r)));
+    await startNavigation(plan, 0, false);
+    await stopNavigation();
+    await startNavigation(plan, 0, true);
+    resolve(false);
+    await settle();
+    expect(useNavSession.getState().error).toBeNull();
+  });
+});
+
+describe('envio do rastro', () => {
+  const samples = vi.mocked(api.samples);
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('envia pelos fixes, sem depender do timer que o Android pausa com o app em segundo plano', async () => {
+    let now = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    await startNavigation(plan, 0, false);
+    useLocationStore.setState({ fix: { t: 1, lat: 0, lon: 0 } });
+    await settle();
+    samples.mockClear();
+    now += 16_000;
+    useLocationStore.setState({ fix: { t: 2, lat: 0, lon: 0 } });
+    await settle();
+    expect(samples).toHaveBeenCalledTimes(1);
+  });
+
+  it('divide em lotes de até 2000 amostras, o limite da API', async () => {
+    let now = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    await startNavigation(plan, 0, false);
+    useLocationStore.setState({ fix: { t: 0, lat: 0, lon: 0 } });
+    await settle();
+    samples.mockClear();
+    samples.mockRejectedValue(new Error('offline'));
+    for (let t = 1; t <= 4500; t++) {
+      if (t % 1000 === 0) now += 16_000;
+      useLocationStore.setState({ fix: { t, lat: 0, lon: 0 } });
+    }
+    await settle();
+    expect(samples.mock.calls.every(([, batch]) => batch.length <= 2000)).toBe(true);
+    samples.mockReset();
+    samples.mockResolvedValue({ stored: 0 });
+    await stopNavigation();
+    const sent = samples.mock.calls.flatMap(([, batch]) => batch.map((b) => b.t));
+    expect(samples.mock.calls.every(([, batch]) => batch.length <= 2000)).toBe(true);
+    expect(sent).toEqual(Array.from({ length: 4501 }, (_, i) => i));
+  });
+});
+
+describe('envio do rastro entre viagens', () => {
+  const samples = vi.mocked(api.samples);
+  const finishTrip = vi.mocked(api.finishTrip);
+  const at = (t: number) => ({ t, lat: 0, lon: 0 });
+  const sentTo = (tripId: string) => samples.mock.calls.filter(([id]) => id === tripId).flatMap(([, b]) => b.map((x) => x.t));
+  let now = 1_000_000;
+
+  beforeEach(() => {
+    now = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    vi.mocked(api.startTrip).mockResolvedValueOnce({ tripId: 'A' }).mockResolvedValueOnce({ tripId: 'B' });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Viagem A com um envio pendente, depois a viagem B começa. */
+  async function startAThenB(pendingA: Promise<{ stored: number }>) {
+    samples.mockReturnValueOnce(pendingA);
+    await startNavigation(plan, 0, false);
+    useLocationStore.setState({ fix: at(1) });
+    now += 16_000;
+    useLocationStore.setState({ fix: at(2) });
+    await settle();
+    expect(sentTo('A')).toEqual([1, 2]);
+    await startNavigation(plan, 0, false);
+    await settle();
+  }
+
+  it('encerra a viagem B com o rastro dela, mesmo com um envio da viagem A pendente', async () => {
+    let releaseA!: () => void;
+    await startAThenB(new Promise((r) => (releaseA = () => r({ stored: 2 }))));
+    useLocationStore.setState({ fix: at(3) });
+    const stopping = stopNavigation();
+    await settle();
+    releaseA();
+    await stopping;
+    // B começa com o último fix conhecido (2). Com o rastro de A misturado, seria [1, 2, 2, 3].
+    expect(sentTo('B')).toEqual([2, 3]);
+    const sendB = samples.mock.invocationCallOrder[samples.mock.calls.findIndex(([id]) => id === 'B')]!;
+    expect(sendB).toBeLessThan(finishTrip.mock.invocationCallOrder[0]!);
+    expect(finishTrip).toHaveBeenCalledWith('B');
+  });
+
+  it('um envio da viagem A que falha depois de B começar não põe o rastro de A em B', async () => {
+    let failA!: () => void;
+    await startAThenB(new Promise((_, reject) => (failA = () => reject(new Error('offline')))));
+    failA();
+    await settle();
+    useLocationStore.setState({ fix: at(3) });
+    await stopNavigation();
+    // B começa com o último fix conhecido (2). Com o rastro de A misturado, seria [1, 2, 2, 3].
+    expect(sentTo('B')).toEqual([2, 3]);
+  });
+});
+
+describe('resposta atrasada de startTrip', () => {
+  const startTrip = vi.mocked(api.startTrip);
+
+  it('a resposta de uma viagem já encerrada não muda a navegação seguinte', async () => {
+    let releaseA!: () => void;
+    startTrip
+      .mockReturnValueOnce(new Promise((r) => (releaseA = () => r({ tripId: 'A' }))))
+      .mockResolvedValueOnce({ tripId: 'B' });
+    const startingA = startNavigation(plan, 0, false);
+    await settle();
+    await stopNavigation();
+    await startNavigation(plan, 0, false);
+    releaseA();
+    await startingA;
+    expect(useNavSession.getState().tripId).toBe('B');
+    await stopNavigation();
+    expect(api.finishTrip).toHaveBeenCalledTimes(1);
+    expect(api.finishTrip).toHaveBeenCalledWith('B');
+  });
+
+  it('a falha de uma viagem já encerrada não mostra erro', async () => {
+    let failA!: () => void;
+    startTrip.mockReturnValueOnce(new Promise((_, reject) => (failA = () => reject(new Error('offline')))));
+    const startingA = startNavigation(plan, 0, false);
+    await settle();
+    await stopNavigation();
+    failA();
+    await startingA;
+    expect(useNavSession.getState().error).toBeNull();
+    expect(useNavSession.getState().tripId).toBeNull();
+  });
+});
+
+describe('navegação com a tela bloqueada sem suporte (web)', () => {
+  it('não tenta iniciar nem mostra aviso', async () => {
+    mocks.bgSupported = false;
+    await startNavigation(plan, 0, false);
+    await settle();
+    expect(startBackgroundLocation).not.toHaveBeenCalled();
+    expect(useNavSession.getState().error).toBeNull();
   });
 });

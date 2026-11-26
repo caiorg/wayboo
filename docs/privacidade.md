@@ -31,6 +31,14 @@ Cada linha de `devices` tem também um id público, a data do registro, o últim
 | `alerts` | Alertas que o usuário criou (tipo, coordenada, horário) | Mostrar o alerta para a comunidade | Some do mapa ao expirar (30 min a 180 dias, conforme o tipo); a linha e os votos saem `GPS_RETENTION_HOURS` horas depois |
 | `alert_votes` | Voto do usuário em alertas de outros | Impedir voto repetido | Até o usuário apagar |
 
+## Localização com a tela bloqueada
+
+No Android e no iOS, a navegação real continua com a tela bloqueada. A chave fica em Ajustes > Navegação > "Continuar com a tela bloqueada" e vem ligada. O app usa só a permissão de localização "ao usar o app" e não pede acesso "sempre".
+
+- O GPS em segundo plano começa ao iniciar a navegação e para ao chegar, ao encerrar ou ao fechar o app. A simulação não o usa. Na abertura, o app desliga o que uma sessão encerrada no meio da viagem tenha deixado ligado.
+- No Android, uma notificação fica visível até o fim da viagem com o título "Navegando para <destino>", que aparece também na tela bloqueada. No iOS, o sistema mostra o indicador azul de localização na barra de status.
+- Os pontos recebidos com a tela bloqueada entram no mesmo rastro de `samples`, com o mesmo prazo. Nada é gravado fora de uma navegação.
+
 ## Dados agregados
 
 Com o opt-in de `PUT /privacy` ligado, a viagem soma ao usuário agregado (`user_id = '*'` em `stats`) só a duração relativa de cada trecho, com o tipo de dia e a faixa de 30 minutos. A data vai sem horário. Não vai rastro, lugar nem `user_id`, então essa contribuição não pode ser separada depois e continua no agregado mesmo após o usuário apagar os dados.
