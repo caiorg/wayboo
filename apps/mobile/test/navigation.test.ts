@@ -15,12 +15,16 @@ const mocks = vi.hoisted(() => ({
   offRoute: false,
   visit: false,
   async: new Map<string, string>(),
+  readGate: null as Promise<void> | null,
   navigators: [] as { route: unknown; updates: number }[],
 }));
 
 vi.mock('@react-native-async-storage/async-storage', () => ({
   default: {
-    getItem: async (k: string) => mocks.async.get(k) ?? null,
+    getItem: async (k: string) => {
+      if (mocks.readGate) await mocks.readGate;
+      return mocks.async.get(k) ?? null;
+    },
     setItem: async (k: string, v: string) => void mocks.async.set(k, v),
     removeItem: async (k: string) => void mocks.async.delete(k),
   },
@@ -119,6 +123,7 @@ beforeEach(() => {
   mocks.offRoute = false;
   mocks.visit = false;
   mocks.navigators = [];
+  mocks.readGate = null;
   mocks.async.clear();
   useSettings.setState({ voice: false, backgroundNav: true });
   useNavSession.setState({ muted: false, status: 'idle', error: null });
@@ -762,5 +767,18 @@ describe('navegação sem rede', () => {
     fail(new Error('Viagem não registrada'));
     await starting;
     expect(useNavSession.getState()).toMatchObject({ tripId: 't1', error: null });
+  });
+
+  it('retomada que termina de ler depois de outra navegação começar e acabar é descartada', async () => {
+    await saveActiveTrip({ savedAt: Date.now(), apiUrl: 'https://api.wayboo.app', plan, routeIndex: 0, stops: [], tripId: 't9', buffer: [] });
+    let open!: () => void;
+    mocks.readGate = new Promise((r) => (open = r));
+    const resuming = resumeNavigation();
+    await startNavigation(plan, 0, true);
+    await stopNavigation();
+    expect(useNavSession.getState().status).toBe('idle');
+    open();
+    expect(await resuming).toBe(false);
+    expect(useNavSession.getState()).toMatchObject({ status: 'idle', tripId: null });
   });
 });
