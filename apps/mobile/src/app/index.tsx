@@ -10,7 +10,7 @@ import { AlertSheet, ArrivalCard, ReportSheet, SuggestionCard } from '@/componen
 import { RouteSheet } from '@/components/RouteSheet';
 import { SearchPanel } from '@/components/SearchPanel';
 import { Card, IconButton, T } from '@/components/ui';
-import { alertsByIds, groupIdsOf, mergeAlerts } from '@/lib/alertGroups';
+import { alertsBox, alertsByIds, groupIdsOf, mergeAlerts } from '@/lib/alertGroups';
 import { api, ApiError, RegistrationLimitError, type GeocodeResult } from '@/lib/api';
 import { checkReportAccuracy } from '@/lib/gpsAccuracy';
 import { startLocation, useLocationStore } from '@/lib/location';
@@ -47,14 +47,12 @@ export default function MapScreen() {
   const [nearbyAlerts, setNearbyAlerts] = useState<RoadAlert[]>([]);
   /** Ids do grupo do marcador tocado, enquanto a folha de detalhes está aberta. */
   const [selectedAlerts, setSelectedAlerts] = useState<string[] | null>(null);
-  /** Respostas de voto. Entram na junção dos alertas, onde vence a cópia com mais votos. */
-  const [votedAlerts, setVotedAlerts] = useState<RoadAlert[]>([]);
-  /** Alertas que o servidor disse não existirem mais (404 ao votar). */
+  /** Cópias mais novas que as das fontes: respostas de voto e recargas pontuais. Entram em `mergeAlerts` como correções. */
+  const [freshAlerts, setFreshAlerts] = useState<RoadAlert[]>([]);
+  /** Alertas que o servidor disse não existirem mais: 404 ao votar ou ausentes numa recarga pontual. */
   const [goneAlerts, setGoneAlerts] = useState<ReadonlySet<string>>(new Set());
   /** Votos a caminho do servidor, com a direção, para o spinner ir no botão tocado. */
   const [voting, setVoting] = useState<ReadonlyMap<string, 'up' | 'down'>>(new Map());
-  /** Muda para recarregar os alertas ao redor fora do intervalo de um minuto. */
-  const [alertsReload, setAlertsReload] = useState(0);
   const [camera, setCamera] = useState<(CameraCommand & { nonce: number }) | null>(null);
   const [follow, setFollow] = useState(true);
   const nonce = useRef(0);
@@ -113,13 +111,41 @@ export default function MapScreen() {
       });
   }, [hereKey, plan, session.status, backgroundError]);
 
-  // Respostas de voto e alertas sumidos são da identidade que votou. Depois de apagar os dados
-  // (`resetIdentity` nos Ajustes), a identidade nova começa sem eles e recarrega a lista abaixo.
+  /**
+   * Busca de novo os alertas de `list` numa caixa que cobre todos, sem depender da localização
+   * (planos feitos sem GPS também), e guarda as cópias novas como correções. Alerta da lista que não
+   * volta expirou; com 500 resultados (o limite da API), a ausência não prova nada.
+   */
+  const refreshAlerts = useCallback(
+    async (list: RoadAlert[]) => {
+      const box = alertsBox(list);
+      if (!box) return;
+      const who = useSettings.getState().userId;
+      try {
+        const { alerts } = await api.alerts(box);
+        if (useSettings.getState().userId !== who) return;
+        const fresh = new Map(alerts.map((a) => [a.id, a]));
+        setFreshAlerts((cur) => [...cur.filter((x) => !fresh.has(x.id)), ...fresh.values()]);
+        if (alerts.length < 500) {
+          const gone = list.filter((a) => !fresh.has(a.id)).map((a) => a.id);
+          if (gone.length) setGoneAlerts((cur) => new Set([...cur, ...gone]));
+        }
+      } catch (e) {
+        backgroundError(e);
+      }
+    },
+    [backgroundError],
+  );
+
+  // Correções, alertas sumidos e os campos `mine`/`myVote` são da identidade que votou. Depois de
+  // apagar os dados (`resetIdentity` nos Ajustes), a identidade nova descarta os dois primeiros,
+  // recarrega a lista ao redor (efeito abaixo) e busca de novo os alertas dos planos abertos.
   useEffect(() => {
-    setVotedAlerts([]);
+    setFreshAlerts([]);
     setGoneAlerts(new Set());
     setSelectedAlerts(null);
-  }, [userId]);
+    void refreshAlerts([...(plan?.routes ?? []), ...(session.plan?.routes ?? [])].flatMap((r) => r.alerts));
+  }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Alertas da comunidade ao redor, atualizados a cada minuto.
   useEffect(() => {
@@ -133,7 +159,7 @@ export default function MapScreen() {
     void load();
     const id = setInterval(load, 60_000);
     return () => clearInterval(id);
-  }, [hereKey, backgroundError, alertsReload, userId]);
+  }, [hereKey, backgroundError, userId]);
 
   const fitPlan = useCallback(
     (p: PlanResponse) => {
@@ -261,15 +287,18 @@ export default function MapScreen() {
 
   const vote = async (a: RoadAlert, up: boolean) => {
     setVoting((cur) => new Map(cur).set(a.id, up ? 'up' : 'down'));
+    const voter = useSettings.getState().userId;
     try {
       const updated = await api.vote(a.id, up);
-      setVotedAlerts((cur) => [...cur.filter((x) => x.id !== updated.id), updated]);
+      // Os dados foram apagados durante a chamada: o voto é da identidade antiga.
+      if (useSettings.getState().userId !== voter) return;
+      setFreshAlerts((cur) => [...cur.filter((x) => x.id !== updated.id), updated]);
       if (Date.parse(updated.expiresAt) <= Date.now()) notify('Alerta tirado do mapa. Obrigado!');
       else notify(up ? 'Confirmação registrada. Obrigado!' : 'Negação registrada. Obrigado!');
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) setGoneAlerts((cur) => new Set(cur).add(a.id));
-      // Já votou (em outro aparelho, ou a lista estava velha) ou é o autor: a lista nova traz o estado certo.
-      if (e instanceof ApiError && (e.status === 409 || e.status === 403)) setAlertsReload((n) => n + 1);
+      // Já votou (em outro aparelho, ou a lista estava velha) ou é o autor: a cópia nova traz o estado certo.
+      if (e instanceof ApiError && (e.status === 409 || e.status === 403)) void refreshAlerts([a]);
       notify(e instanceof Error ? e.message : 'Falha ao votar');
     } finally {
       setVoting((cur) => {
@@ -292,7 +321,7 @@ export default function MapScreen() {
   const mapData: MapData = useMemo(() => {
     // O plano é uma foto do momento em que foi pedido; os alertas ao redor são recarregados a cada minuto.
     const alerts = (p: PlanResponse | null | undefined) =>
-      mergeAlerts([(p?.routes ?? []).flatMap((r) => r.alerts), nearbyAlerts], goneAlerts, Date.now(), votedAlerts);
+      mergeAlerts([(p?.routes ?? []).flatMap((r) => r.alerts), nearbyAlerts], goneAlerts, Date.now(), freshAlerts);
     if (navigating && session.route) {
       return {
         routes: [{ id: session.route.id, coords: session.route.geometry, selected: true }],
@@ -311,7 +340,7 @@ export default function MapScreen() {
       stops,
       puck: here ? { ...here, heading: fix?.heading ?? null, accuracy: fix?.accuracy ?? null } : null,
     };
-  }, [navigating, session.route, session.plan, session.stops, session.nav, plan, selected, stops, nearbyAlerts, votedAlerts, goneAlerts, here?.lat, here?.lon, fix?.accuracy]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [navigating, session.route, session.plan, session.stops, session.nav, plan, selected, stops, nearbyAlerts, freshAlerts, goneAlerts, here?.lat, here?.lon, fix?.accuracy]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sheetAlerts = useMemo(() => (selectedAlerts ? alertsByIds(mapData.alerts, selectedAlerts) : []), [selectedAlerts, mapData.alerts]);
   // Todos os alertas do ponto saíram do mapa (expiraram ou foram negados): fecha a folha.

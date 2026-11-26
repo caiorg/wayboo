@@ -1,6 +1,6 @@
 import type { AlertType, RoadAlert } from '@wayboo/core';
 import { describe, expect, it } from 'vitest';
-import { ALERT_SEVERITY, alertsByIds, groupAlerts, groupIdsOf, mergeAlerts, SAME_SPOT_M, timeAgoPtBR, voteStatus } from '../src/lib/alertGroups';
+import { ALERT_SEVERITY, alertsBox, alertsByIds, groupAlerts, groupIdsOf, mergeAlerts, SAME_SPOT_M, timeAgoPtBR, voteStatus } from '../src/lib/alertGroups';
 
 let seq = 0;
 function alert(type: AlertType, lat: number, lon: number, createdAt = '2026-11-23T10:00:00.000Z'): RoadAlert {
@@ -150,5 +150,17 @@ describe('timeAgoPtBR', () => {
 
   it('data no futuro (relógio adiantado) conta como agora', () => {
     expect(ago(-5 * 60_000)).toBe('agora');
+  });
+});
+
+describe('alertsBox', () => {
+  it('cobre todos os alertas com uma folga', () => {
+    const box = alertsBox([alert('police', -23.55, -46.63), alert('flood', -23.6, -46.6)]);
+    const expected = { minLat: -23.601, minLon: -46.631, maxLat: -23.549, maxLon: -46.599 };
+    for (const k of Object.keys(expected) as (keyof typeof expected)[]) expect(box![k]).toBeCloseTo(expected[k], 9);
+  });
+
+  it('sem alertas, não há caixa', () => {
+    expect(alertsBox([])).toBeNull();
   });
 });

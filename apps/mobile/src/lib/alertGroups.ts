@@ -96,3 +96,11 @@ export function timeAgoPtBR(iso: string, now = Date.now()): string {
   const d = Math.floor(h / 24);
   return d === 1 ? 'há 1 dia' : `há ${d} dias`;
 }
+
+/** Caixa que cobre os alertas, com folga de `pad` graus, para buscá-los de novo em `GET /alerts`. */
+export function alertsBox(alerts: RoadAlert[], pad = 0.001): { minLat: number; minLon: number; maxLat: number; maxLon: number } | null {
+  if (!alerts.length) return null;
+  const lats = alerts.map((a) => a.lat);
+  const lons = alerts.map((a) => a.lon);
+  return { minLat: Math.min(...lats) - pad, minLon: Math.min(...lons) - pad, maxLat: Math.max(...lats) + pad, maxLon: Math.max(...lons) + pad };
+}
