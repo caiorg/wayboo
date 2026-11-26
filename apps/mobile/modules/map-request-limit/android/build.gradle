@@ -1,0 +1,16 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'dev.wayboo'
+version = '1.0.0'
+
+android {
+  namespace "dev.wayboo.maprequestlimit"
+}
+
+dependencies {
+  // Mesma versão que o @maplibre/maplibre-react-native usa (org.maplibre.reactnative.okhttpVersion).
+  implementation "com.squareup.okhttp3:okhttp:4.12.0"
+}
