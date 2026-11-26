@@ -1,5 +1,5 @@
 import { OfflineManager, type OfflinePack, type OfflinePackStatus } from '@maplibre/maplibre-react-native';
-import { countedBytes, judgeProgress, OFFLINE_MAX_ZOOM, OFFLINE_MIN_ZOOM, type Bounds } from './offlineArea';
+import { countedBytes, judgeProgress, OFFLINE_MAX_ZOOM, OFFLINE_MIN_ZOOM, STOP_AT_BYTES, type Bounds } from './offlineArea';
 
 /** Gravado em cada pacote: identifica os do Wayboo e a parte da rota a que pertencem. */
 // `type`, não `interface`: precisa caber no `Record<string, unknown>` do metadata do pacote.
@@ -50,16 +50,27 @@ type Budget = { reusesTiles: boolean; alreadyBytes: number };
 type Followed = { verdict: 'complete' | 'limit'; bytes: number } | { error: string };
 
 /**
- * Para o pacote. Se a pausa falhar, apaga: um pacote solto continuaria baixando além do limite e em paralelo
- * com o próximo download. Devolve false quando o pacote não ficou salvo.
+ * Pacote que não conseguimos pausar nem apagar e pode seguir baixando. Enquanto ele estiver ativo, nenhum download
+ * novo começa: seriam dois em paralelo, acima das 4 requisições dos termos.
  */
-async function halt(pack: OfflinePack): Promise<boolean> {
+let runaway: OfflinePack | null = null;
+
+/**
+ * Para o pacote. Se a pausa falhar, apaga: um pacote solto continuaria baixando além do limite e em paralelo
+ * com o próximo download.
+ */
+async function halt(pack: OfflinePack): Promise<'paused' | 'deleted' | 'failed'> {
   try {
     await pack.pause();
-    return true;
+    return 'paused';
   } catch {
-    await OfflineManager.deletePack(pack.id).catch(() => {});
-    return false;
+    try {
+      await OfflineManager.deletePack(pack.id);
+      return 'deleted';
+    } catch {
+      runaway = pack;
+      return 'failed';
+    }
   }
 }
 
@@ -75,8 +86,10 @@ function follow(pack: OfflinePack, budget: Budget, onProgress: (status: OfflineP
       settled = true;
       clearInterval(timer);
       OfflineManager.removeListener(pack.id);
-      const kept = stop ? await halt(pack) : true;
-      resolve(kept || 'error' in result ? result : { error: 'Não foi possível pausar o download; a parte foi descartada.' });
+      const stopped = stop ? await halt(pack) : 'paused';
+      if (stopped === 'failed') resolve({ error: 'Não foi possível parar o download desta parte.' });
+      else if (stopped === 'deleted' && !('error' in result)) resolve({ error: 'Não foi possível pausar o download; a parte foi descartada.' });
+      else resolve(result);
     };
     const check = (status: OfflinePackStatus | null) => {
       if (settled) return;
@@ -152,8 +165,15 @@ export async function downloadArea(
   { styles, bounds, meta }: { styles: string[]; bounds: Bounds; meta: OfflineMeta },
   onProgress: (p: DownloadProgress) => void,
 ): Promise<DownloadResult> {
+  if (runaway) {
+    const s = await statusOf(runaway);
+    if (s?.state === 'active') return { status: 'error', message: 'O download anterior ainda não parou. Tente de novo daqui a pouco.' };
+    runaway = null;
+  }
   let bytes = 0;
   for (const [i, style] of styles.entries()) {
+    // O estilo anterior já gastou a cota da parte: o próximo não começa.
+    if (bytes >= STOP_AT_BYTES) return { status: 'partial', bytes };
     const budget: Budget = { reusesTiles: i > 0, alreadyBytes: bytes };
     try {
       const opened = await openPack(style, bounds, meta, budget);

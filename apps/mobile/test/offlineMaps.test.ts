@@ -193,6 +193,35 @@ describe('downloadArea', () => {
     expect(OfflineManager.deletePack).toHaveBeenCalledWith('p1');
   });
 
+  it('primeiro estilo completo já no limite: o segundo nem começa', async () => {
+    const done = downloadArea({ styles: ['https://s/light', 'https://s/dark'], bounds, meta: meta() }, () => {});
+    await emit({ state: 'complete', percentage: 100, completedResourceSize: STOP_AT_BYTES + 10, completedTileSize: STOP_AT_BYTES });
+    await expect(done).resolves.toEqual({ status: 'partial', bytes: STOP_AT_BYTES + 10 });
+    expect(OfflineManager.createPack).toHaveBeenCalledTimes(1);
+  });
+
+  it('se não der para pausar nem apagar, avisa e recusa outro download', async () => {
+    const done = downloadArea({ styles: ['https://s/light'], bounds, meta: meta() }, () => {});
+    await settle();
+    h.packs[0]!.pause.mockRejectedValueOnce(new Error('falhou'));
+    vi.mocked(OfflineManager.deletePack).mockRejectedValueOnce(new Error('falhou'));
+    await emit({ completedResourceSize: STOP_AT_BYTES });
+    await expect(done).resolves.toEqual({ status: 'error', message: 'Não foi possível parar o download desta parte.' });
+    const stuck = h.packs[0]!;
+    await expect(downloadArea({ styles: ['https://s/light'], bounds, meta: meta({ part: 2 }) }, () => {})).resolves.toEqual({
+      status: 'error',
+      message: 'O download anterior ainda não parou. Tente de novo daqui a pouco.',
+    });
+    expect(OfflineManager.createPack).toHaveBeenCalledTimes(1);
+    // Quando o pacote preso para (terminou ou foi pausado), o próximo download segue.
+    stuck.current = { ...stuck.current!, state: 'complete' };
+    const next = downloadArea({ styles: ['https://s/light'], bounds, meta: meta({ part: 2 }) }, () => {});
+    await settle();
+    expect(OfflineManager.createPack).toHaveBeenCalledTimes(2);
+    await emit({ state: 'complete', percentage: 100 });
+    await expect(next).resolves.toMatchObject({ status: 'complete' });
+  });
+
   it('pacote que nunca fica ativo encerra com erro em vez de esperar para sempre', async () => {
     vi.useFakeTimers();
     try {
