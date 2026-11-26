@@ -45,7 +45,7 @@ export const useOfflineRoute = create<OfflineRouteState>(() => ({
 const keyOf = (routeId: string, styles: string[]) => `${routeId} ${styles.join(' ')}`;
 
 /**
- * Sobe a cada mudança de `done` ou `limited` (preparo ou fim de download). Uma releitura que começou antes é de
+ * Sobe a cada mudança de `done` ou `limited` (preparo, fim de download ou exclusão). Uma releitura que começou antes é de
  * um estado velho: em vez de gravar, lê de novo.
  */
 let revision = 0;
@@ -128,6 +128,8 @@ export async function deleteOfflineMaps(): Promise<DeleteResult> {
   } catch {
     return { status: 'error' };
   } finally {
+    // O que estava no aparelho mudou, mesmo numa falha no meio: releituras que começaram antes leem de novo.
+    revision++;
     // Também depois de uma falha no meio: o botão da rota volta a oferecer o que foi apagado. Segue em `deleting`
     // até a releitura acabar, senão um download que começasse no meio teria a parte nova sobrescrita por ela.
     await refreshSavedParts();

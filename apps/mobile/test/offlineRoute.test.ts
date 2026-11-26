@@ -233,4 +233,21 @@ describe('download do mapa da rota', () => {
     await refreshSavedParts();
     expect(useOfflineRoute.getState().limited).toEqual([]);
   });
+
+  it('releitura que começou antes de apagar não traz de volta as partes apagadas', async () => {
+    vi.mocked(listOfflineAreas).mockResolvedValueOnce([area(1, styles[0]!, true), area(1, styles[1]!, true)]);
+    await prepareOfflineRoute(route, styles);
+    expect(useOfflineRoute.getState().done).toEqual([1]);
+    let stale!: (a: Awaited<ReturnType<typeof listOfflineAreas>>) => void;
+    vi.mocked(listOfflineAreas)
+      .mockReturnValueOnce(new Promise((r) => (stale = r)))
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    const refreshing = refreshSavedParts();
+    await deleteOfflineMaps();
+    expect(useOfflineRoute.getState().done).toEqual([]);
+    stale([area(1, styles[0]!, true), area(1, styles[1]!, true)]);
+    await refreshing;
+    expect(useOfflineRoute.getState().done).toEqual([]);
+  });
 });
