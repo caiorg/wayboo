@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Coord } from './geo';
+import type { Lane } from './lanes';
 
 export const LatLonSchema = z.object({ lat: z.number().min(-90).max(90), lon: z.number().min(-180).max(180) });
 export type LatLon = z.infer<typeof LatLonSchema>;
@@ -26,6 +27,8 @@ export interface Maneuver {
   roundaboutExit?: number;
   toll: boolean;
   highway: boolean;
+  /** Faixas da via antes da manobra, da esquerda para a direita. Ausente quando o OSM não tem `turn:lanes`. */
+  lanes?: Lane[];
 }
 
 /** Trecho de ~300 m da rota. É a unidade em que o ETA aprende. */
@@ -90,7 +93,7 @@ export const TraceSampleSchema = z.object({
 export type TraceSample = z.infer<typeof TraceSampleSchema>;
 
 export interface EtaFactor {
-  kind: 'segments' | 'time_of_day' | 'context' | 'routine' | 'alerts' | 'crowd';
+  kind: 'segments' | 'live' | 'time_of_day' | 'context' | 'routine' | 'alerts' | 'crowd';
   label: string;
   /** Delta em segundos em relação ao ETA base do roteador. */
   deltaS: number;

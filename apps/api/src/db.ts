@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import {
+  LIVE_WINDOW_MS,
   PRIOR_WEIGHTS,
   segmentOfKey,
+  type LiveObservation,
   type DecayedStat,
   type LatLon,
   type Place,
@@ -74,6 +76,9 @@ CREATE TABLE IF NOT EXISTS devices (token_hash TEXT PRIMARY KEY, user_id TEXT NO
 CREATE INDEX IF NOT EXISTS devices_user ON devices(user_id);
 CREATE TABLE IF NOT EXISTS deleted_users (user_id TEXT PRIMARY KEY);
 `);
+
+/** Condição de INSERT ... SELECT que grava só se o usuário (último parâmetro) não foi apagado por `DELETE /me`. */
+const NOT_DELETED = 'NOT EXISTS (SELECT 1 FROM deleted_users WHERE user_id = ?)';
 
 // Bancos criados antes da retenção não têm a coluna; `CREATE TABLE IF NOT EXISTS` não a acrescenta.
 if (!db.prepare("SELECT 1 FROM pragma_table_info('trips') WHERE name = 'last_sample_at'").get()) {
@@ -231,12 +236,14 @@ export function getRoutineRoutes(userId: string, originId: string, destId: strin
   };
 }
 
+/** Como `savePlan`, não grava para usuário em `deleted_users`: a rota chega depois de esperar o roteador. */
 export function saveRoutineRoutes(userId: string, originId: string, destId: string, v: RoutineRoutes): void {
   db.prepare(
-    `INSERT INTO routine_routes (user_id, origin_id, dest_id, from_lat, from_lon, to_lat, to_lon, fetched_at, routes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO routine_routes (user_id, origin_id, dest_id, from_lat, from_lon, to_lat, to_lon, fetched_at, routes)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${NOT_DELETED}
      ON CONFLICT(user_id, origin_id, dest_id) DO UPDATE SET from_lat = excluded.from_lat, from_lon = excluded.from_lon,
        to_lat = excluded.to_lat, to_lon = excluded.to_lon, fetched_at = excluded.fetched_at, routes = excluded.routes`,
-  ).run(userId, originId, destId, v.from.lat, v.from.lon, v.to.lat, v.to.lon, v.fetchedAt, JSON.stringify(v.routes));
+  ).run(userId, originId, destId, v.from.lat, v.from.lon, v.to.lat, v.to.lon, v.fetchedAt, JSON.stringify(v.routes), userId);
 }
 
 // ---------- preferências ----------
@@ -336,34 +343,71 @@ export function getShareCrowd(userId: string): boolean {
 }
 
 export function setShareCrowd(userId: string, share: boolean): void {
-  db.prepare(
-    `INSERT INTO privacy (user_id, share_crowd, updated_at) VALUES (?, ?, ?)
-     ON CONFLICT(user_id) DO UPDATE SET share_crowd = excluded.share_crowd, updated_at = excluded.updated_at`,
-  ).run(userId, share ? 1 : 0, Date.now());
+  transaction(() => {
+    db.prepare(
+      `INSERT INTO privacy (user_id, share_crowd, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET share_crowd = excluded.share_crowd, updated_at = excluded.updated_at`,
+    ).run(userId, share ? 1 : 0, Date.now());
+    // Revogar o opt-in tira também o que o usuário mediu nos últimos minutos, na mesma transação.
+    if (!share) db.prepare('DELETE FROM live_obs WHERE user_id = ?').run(userId);
+  });
+}
+
+// ---------- trânsito ao vivo ----------
+
+/**
+ * Última medida de cada usuário com opt-in em cada trecho, nos últimos 15 min: o log da razão e o instante
+ * de saída do trecho, no relógio do servidor. O `user_id` só serve para contar usuários distintos e
+ * guardar uma medida por pessoa; nunca sai da API. Linhas com mais de 15 min saem a cada gravação e leitura.
+ */
+db.exec(`
+CREATE TABLE IF NOT EXISTS live_obs (
+  seg TEXT NOT NULL, user_id TEXT NOT NULL, t INTEGER NOT NULL, x REAL NOT NULL,
+  PRIMARY KEY (seg, user_id)
+);
+CREATE INDEX IF NOT EXISTS live_obs_t ON live_obs(t);
+`);
+
+const purgeLive = (now: number) => Number(db.prepare('DELETE FROM live_obs WHERE t < ?').run(now - LIVE_WINDOW_MS).changes);
+
+export function saveLiveObservations(userId: string, observations: { seg: string; t: number; x: number }[], now = Date.now()): void {
+  purgeLive(now);
+  const stmt = db.prepare(
+    `INSERT INTO live_obs (seg, user_id, t, x) VALUES (?, ?, ?, ?)
+     ON CONFLICT(seg, user_id) DO UPDATE SET t = excluded.t, x = excluded.x WHERE excluded.t >= live_obs.t`,
+  );
+  for (const o of observations) stmt.run(o.seg, userId, o.t, o.x);
+}
+
+/** Observações da janela nos trechos pedidos, para `aggregateLive`. */
+export function loadLiveObservations(segs: string[], now = Date.now()): LiveObservation[] {
+  purgeLive(now);
+  const unique = [...new Set(segs)];
+  const out: LiveObservation[] = [];
+  for (let i = 0; i < unique.length; i += 400) {
+    const part = unique.slice(i, i + 400);
+    const rows = db
+      .prepare(`SELECT seg, user_id, t, x FROM live_obs WHERE seg IN (${part.map(() => '?').join(',')})`)
+      .all(...part) as Row[];
+    for (const r of rows) out.push({ seg: String(r.seg), contributor: String(r.user_id), t: Number(r.t), x: Number(r.x) });
+  }
+  return out;
 }
 
 // ---------- planos ----------
 
 /**
- * Última exclusão de cada usuário, só em memória, com um contador em vez de relógio para não depender
- * da resolução de `Date.now()`. Basta durar mais que o pedido mais longo; não vai para o disco.
- */
-const deletions = new Map<string, { seq: number; at: number }>();
-const DELETION_MEMORY_MS = 10 * 60_000;
-let deletionSeq = 0;
-
-/** Marca o início de um pedido que grava depois de esperar; passe o valor para `savePlan`. */
-export const deletionTicket = () => deletionSeq;
-
-/**
- * Grava o plano, salvo se o usuário foi apagado (`DELETE /me`) depois de `ticket` (de `deletionTicket()`,
- * pego no início do pedido). O planejamento espera os provedores; sem essa checagem, um pedido em curso
- * recriaria origem, destino e rota depois da exclusão, mesmo que o aparelho se registre de novo com o mesmo id.
+ * Grava o plano, salvo se o usuário está em `deleted_users`. O planejamento espera os provedores (IA, clima,
+ * roteador); sem essa checagem, um pedido que começou antes do `DELETE /me` recriaria origem, destino e rota.
+ * Um id apagado nunca volta a um aparelho (`registerDevice`), então só pedidos assim chegam aqui com ele.
+ * A checagem fica no próprio INSERT, e vale com o servidor reiniciado ou com outro processo no mesmo banco.
  * Devolve se gravou.
  */
-export function savePlan(userId: string, plan: PlanResponse, ticket: number): boolean {
-  if ((deletions.get(userId)?.seq ?? 0) > ticket) return false;
-  db.prepare('INSERT INTO plans (id, user_id, created_at, body) VALUES (?, ?, ?, ?)').run(plan.planId, userId, plan.createdAt, JSON.stringify(plan));
+export function savePlan(userId: string, plan: PlanResponse): boolean {
+  const inserted = db
+    .prepare(`INSERT INTO plans (id, user_id, created_at, body) SELECT ?, ?, ?, ? WHERE ${NOT_DELETED}`)
+    .run(plan.planId, userId, plan.createdAt, JSON.stringify(plan), userId).changes;
+  if (!inserted) return false;
   // Planos só servem para iniciar viagens; os de mais de 2 dias sem viagem podem sair.
   db.prepare(
     'DELETE FROM plans WHERE created_at < ? AND id NOT IN (SELECT plan_id FROM trip_legs)',
@@ -385,8 +429,17 @@ export function insertSamples(tripId: string, samples: TraceSample[], now = Date
   db.prepare('UPDATE trips SET last_sample_at = ? WHERE id = ?').run(now, tripId);
 }
 
-export function getSamples(tripId: string): TraceSample[] {
-  return (db.prepare('SELECT t, lat, lon, speed, heading, accuracy FROM samples WHERE trip_id = ? ORDER BY t').all(tripId) as Row[]).map((r) => ({
+/** Instante da amostra mais recente da viagem (relógio do aparelho), ou `-Infinity` sem amostras. */
+export function lastSampleT(tripId: string): number {
+  const r = db.prepare('SELECT MAX(t) AS t FROM samples WHERE trip_id = ?').get(tripId) as Row | undefined;
+  return r?.t == null ? -Infinity : Number(r.t);
+}
+
+/** Amostras da viagem a partir de `since` (relógio do aparelho), em ordem. */
+export function getSamples(tripId: string, since = -Infinity): TraceSample[] {
+  return (
+    db.prepare('SELECT t, lat, lon, speed, heading, accuracy FROM samples WHERE trip_id = ? AND t >= ? ORDER BY t').all(tripId, since) as Row[]
+  ).map((r) => ({
     t: Number(r.t),
     lat: Number(r.lat),
     lon: Number(r.lon),
@@ -411,7 +464,7 @@ const ABANDONED_TRIP_MS = 86_400_000;
 export function purgeExpiredTraces(
   retentionMs: number,
   now = Date.now(),
-): { samples: number; plans: number; alerts: number; routineRoutes: number } {
+): { samples: number; plans: number; alerts: number; routineRoutes: number; liveObservations: number } {
   const cutoff = now - retentionMs;
   const abandonedCutoff = now - Math.max(retentionMs, ABANDONED_TRIP_MS);
   // Ativa: abandono conta do último envio de amostras pelo relógio do servidor, não da idade da viagem
@@ -426,7 +479,8 @@ export function purgeExpiredTraces(
     db.prepare('DELETE FROM alert_votes WHERE alert_id IN (SELECT id FROM alerts WHERE expires_at < ?)').run(cutoff);
     const alerts = db.prepare('DELETE FROM alerts WHERE expires_at < ?').run(cutoff);
     const routineRoutes = purgeExpiredRoutineRoutes(now);
-    return { samples: Number(samples.changes), plans: Number(plans.changes), alerts: Number(alerts.changes), routineRoutes };
+    const liveObservations = purgeLive(now);
+    return { samples: Number(samples.changes), plans: Number(plans.changes), alerts: Number(alerts.changes), routineRoutes, liveObservations };
   });
 }
 
@@ -450,6 +504,7 @@ const USER_TABLES: { table: string; where: string; columns?: string }[] = [
   { table: 'routine_routes', where: 'user_id = ?' },
   { table: 'prefs', where: 'user_id = ?' },
   { table: 'privacy', where: 'user_id = ?' },
+  { table: 'live_obs', where: 'user_id = ?' },
   { table: 'alerts', where: 'reporter = ?' },
   { table: 'alert_votes', where: 'user_id = ?' },
   { table: 'devices', where: 'user_id = ?', columns: 'id, created_at, last_seen_at, revoked_at' },
@@ -473,9 +528,6 @@ export function exportUserData(userId: string): UserDataExport {
  * O id vai para `deleted_users` (só o id, sem data), e `registerDevice` não o adota de novo.
  */
 export function deleteUserData(userId: string): Record<string, number> {
-  const now = Date.now();
-  for (const [id, d] of deletions) if (d.at < now - DELETION_MEMORY_MS) deletions.delete(id);
-  deletions.set(userId, { seq: ++deletionSeq, at: now });
   return transaction(() => {
     const deleted: Record<string, number> = {};
     for (const t of USER_TABLES) {
