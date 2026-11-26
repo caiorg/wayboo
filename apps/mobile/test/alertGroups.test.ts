@@ -100,6 +100,20 @@ describe('mergeAlerts', () => {
     expect(mergeAlerts([[personal], [a]], new Set(), NOW)).toEqual([personal]);
   });
 
+  it('a resposta de um voto corrige o alerta, mas não o mantém depois que ele sumiu das outras fontes', () => {
+    const a = alert('police', -23.55, -46.63);
+    const voted = { ...a, upvotes: 1, myVote: 'up' as const };
+    expect(mergeAlerts([[a]], new Set(), NOW, [voted])).toEqual([voted]);
+    expect(mergeAlerts([[]], new Set(), NOW, [voted])).toEqual([]);
+  });
+
+  it('a resposta de um voto perde para uma cópia mais nova, com mais votos', () => {
+    const a = alert('police', -23.55, -46.63);
+    const voted = { ...a, upvotes: 1, myVote: 'up' as const };
+    const fresher = { ...a, upvotes: 2, downvotes: 1, mine: false, myVote: 'up' as const };
+    expect(mergeAlerts([[fresher]], new Set(), NOW, [voted])).toEqual([fresher]);
+  });
+
   it('tira alertas expirados e os que sumiram do servidor', () => {
     const live = alert('police', -23.55, -46.63);
     const expired = { ...alert('flood', -23.55, -46.63), expiresAt: '2026-11-23T10:59:59.000Z' };

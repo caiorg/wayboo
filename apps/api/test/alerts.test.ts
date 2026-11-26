@@ -149,6 +149,15 @@ describe('POST /alerts', () => {
     expect(res.body).toMatchObject({ id: alert.id, upvotes: 1, myVote: 'up' });
   });
 
+  it('reportar perto de um alerta que a pessoa negou devolve o voto dela, sem mudar nada', async () => {
+    const { alert, p } = await reported('police');
+    const voter = await register();
+    await call(voter, 'POST', `/alerts/${alert.id}/vote`, { up: false });
+    const res = await call<RoadAlert>(voter, 'POST', '/alerts', { type: 'police', ...p });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ id: alert.id, upvotes: 0, downvotes: 1, myVote: 'down' });
+  });
+
   it('reportar de novo o próprio alerta, ou um já confirmado, não dá erro', async () => {
     const { reporter, alert, p } = await reported('police');
     const again = await call<RoadAlert>(reporter, 'POST', '/alerts', { type: 'police', ...p });

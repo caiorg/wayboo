@@ -69,8 +69,8 @@ export function AlertSheet({
 }: {
   /** Do mais grave para o menos grave, como no marcador. */
   alerts: RoadAlert[];
-  /** Alertas com voto a caminho do servidor. */
-  pending: ReadonlySet<string>;
+  /** Votos a caminho do servidor, com a direção. */
+  pending: ReadonlyMap<string, 'up' | 'down'>;
   onVote: (alert: RoadAlert, up: boolean) => void;
   onClose: () => void;
 }) {
@@ -81,9 +81,11 @@ export function AlertSheet({
   return (
     <Card style={{ gap: 12 }}>
       <View style={styles.row}>
-        <View style={{ flex: 1, gap: 2 }}>
+        <View style={{ flex: 1, gap: 2 }} accessibilityRole="header">
           <T variant="title">{title}</T>
-          <T variant="caption">Confirmar renova a validade. Negações tiram o alerta do mapa. O voto não pode ser trocado.</T>
+          {alerts.some((a) => voteStatus(a) === 'open') ? (
+            <T variant="caption">Confirmar renova a validade. Negações tiram o alerta do mapa. O voto não pode ser trocado.</T>
+          ) : null}
         </View>
         <Pressable accessibilityRole="button" accessibilityLabel="Fechar" onPress={onClose} hitSlop={10}>
           <Icon name="close" color={t.textMuted} />
@@ -92,16 +94,17 @@ export function AlertSheet({
       {/* Em telas baixas, a lista rola em vez de a folha cobrir o mapa inteiro. */}
       <ScrollView style={{ maxHeight: Math.min(360, height * 0.42) }} contentContainerStyle={{ gap: 10 }}>
         {alerts.map((a) => (
-          <AlertRow key={a.id} alert={a} pending={pending.has(a.id)} onVote={(up) => onVote(a, up)} />
+          <AlertRow key={a.id} alert={a} pending={pending.get(a.id) ?? null} onVote={(up) => onVote(a, up)} />
         ))}
       </ScrollView>
     </Card>
   );
 }
 
-function AlertRow({ alert: a, pending, onVote }: { alert: RoadAlert; pending: boolean; onVote: (up: boolean) => void }) {
+function AlertRow({ alert: a, pending, onVote }: { alert: RoadAlert; pending: 'up' | 'down' | null; onVote: (up: boolean) => void }) {
   const t = useTheme();
   const status = voteStatus(a);
+  const label = ALERT_LABELS[a.type]?.toLowerCase() ?? 'alerta';
   const votes = `${plural(a.upvotes, 'confirmação', 'confirmações')} · ${plural(a.downvotes, 'negação', 'negações')}`;
   return (
     <View style={[styles.alertRow, { backgroundColor: t.surfaceAlt }]}>
@@ -125,17 +128,21 @@ function AlertRow({ alert: a, pending, onVote }: { alert: RoadAlert; pending: bo
         <View style={styles.voteRow}>
           <Button
             label="Confirmar"
+            accessibilityLabel={`Confirmar ${label}`}
             icon="thumb-up-outline"
             kind="secondary"
-            loading={pending}
+            loading={pending === 'up'}
+            disabled={pending !== null}
             onPress={() => onVote(true)}
             style={[styles.voteButton, { backgroundColor: t.surface }]}
           />
           <Button
             label="Negar"
+            accessibilityLabel={`Negar ${label}`}
             icon="thumb-down-outline"
             kind="secondary"
-            disabled={pending}
+            loading={pending === 'down'}
+            disabled={pending !== null}
             onPress={() => onVote(false)}
             style={[styles.voteButton, { backgroundColor: t.surface }]}
           />

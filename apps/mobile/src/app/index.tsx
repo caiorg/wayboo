@@ -50,7 +50,10 @@ export default function MapScreen() {
   const [votedAlerts, setVotedAlerts] = useState<RoadAlert[]>([]);
   /** Alertas que o servidor disse não existirem mais (404 ao votar). */
   const [goneAlerts, setGoneAlerts] = useState<ReadonlySet<string>>(new Set());
-  const [voting, setVoting] = useState<ReadonlySet<string>>(new Set());
+  /** Votos a caminho do servidor, com a direção, para o spinner ir no botão tocado. */
+  const [voting, setVoting] = useState<ReadonlyMap<string, 'up' | 'down'>>(new Map());
+  /** Muda para recarregar os alertas ao redor fora do intervalo de um minuto. */
+  const [alertsReload, setAlertsReload] = useState(0);
   const [camera, setCamera] = useState<(CameraCommand & { nonce: number }) | null>(null);
   const [follow, setFollow] = useState(true);
   const nonce = useRef(0);
@@ -121,7 +124,7 @@ export default function MapScreen() {
     void load();
     const id = setInterval(load, 60_000);
     return () => clearInterval(id);
-  }, [hereKey, backgroundError]);
+  }, [hereKey, backgroundError, alertsReload]);
 
   const fitPlan = useCallback(
     (p: PlanResponse) => {
@@ -142,6 +145,7 @@ export default function MapScreen() {
   const showPlan = useCallback(
     (p: PlanResponse, extra: { stops?: StopSuggestion[]; message?: string | null } = {}) => {
       setPlan(p);
+      setSelectedAlerts(null);
       setSelected(p.recommendedIndex);
       setBrief(null);
       setStops(extra.stops ?? []);
@@ -247,7 +251,7 @@ export default function MapScreen() {
   };
 
   const vote = async (a: RoadAlert, up: boolean) => {
-    setVoting((cur) => new Set(cur).add(a.id));
+    setVoting((cur) => new Map(cur).set(a.id, up ? 'up' : 'down'));
     try {
       const updated = await api.vote(a.id, up);
       setVotedAlerts((cur) => [...cur.filter((x) => x.id !== updated.id), updated]);
@@ -255,10 +259,12 @@ export default function MapScreen() {
       else notify(up ? 'Confirmação registrada. Obrigado!' : 'Negação registrada. Obrigado!');
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) setGoneAlerts((cur) => new Set(cur).add(a.id));
+      // Já votou (em outro aparelho, ou a lista estava velha) ou é o autor: a lista nova traz o estado certo.
+      if (e instanceof ApiError && (e.status === 409 || e.status === 403)) setAlertsReload((n) => n + 1);
       notify(e instanceof Error ? e.message : 'Falha ao votar');
     } finally {
       setVoting((cur) => {
-        const next = new Set(cur);
+        const next = new Map(cur);
         next.delete(a.id);
         return next;
       });
@@ -277,7 +283,7 @@ export default function MapScreen() {
   const mapData: MapData = useMemo(() => {
     // O plano é uma foto do momento em que foi pedido; os alertas ao redor são recarregados a cada minuto.
     const alerts = (p: PlanResponse | null | undefined) =>
-      mergeAlerts([(p?.routes ?? []).flatMap((r) => r.alerts), nearbyAlerts, votedAlerts], goneAlerts);
+      mergeAlerts([(p?.routes ?? []).flatMap((r) => r.alerts), nearbyAlerts], goneAlerts, Date.now(), votedAlerts);
     if (navigating && session.route) {
       return {
         routes: [{ id: session.route.id, coords: session.route.geometry, selected: true }],
@@ -320,6 +326,8 @@ export default function MapScreen() {
         onLongPress={onLongPress}
         onUserPan={() => navigating && setFollow(false)}
         onAlertPress={(id) => {
+          // Com o cartão de chegada aberto, a folha ficaria escondida e apareceria sozinha depois.
+          if (session.status === 'arrived') return;
           setReporting(false);
           setSelectedAlerts(groupIdsOf(mapData.alerts, id));
         }}

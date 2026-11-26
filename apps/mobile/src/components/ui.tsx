@@ -59,10 +59,13 @@ export function Button({
   loading,
   disabled,
   style,
+  accessibilityLabel,
 }: {
   label: string;
   onPress: () => void;
   icon?: IconName;
+  /** Quando o rótulo visível não basta fora de contexto (ex.: "Confirmar" numa lista de alertas). */
+  accessibilityLabel?: string;
   kind?: 'primary' | 'secondary' | 'danger' | 'learn';
   loading?: boolean;
   disabled?: boolean;
@@ -74,7 +77,8 @@ export function Button({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={label}
+      accessibilityLabel={accessibilityLabel ?? label}
+      accessibilityState={{ disabled: !!(disabled || loading), busy: !!loading }}
       onPress={onPress}
       disabled={disabled || loading}
       style={({ pressed }) => [

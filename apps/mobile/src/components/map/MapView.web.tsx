@@ -83,9 +83,13 @@ export function MapView({ theme, data, camera, initialCenter, onLongPress, onUse
     m.on('style.load', () => install(m));
     m.on('contextmenu', (e: MapMouseEvent) => latest.current.onLongPress?.({ lat: e.lngLat.lat, lon: e.lngLat.lng }));
     m.on('dragstart', () => latest.current.onUserPan?.());
-    // Os ouvintes por camada valem também para as camadas recriadas depois de trocar o estilo.
-    m.on('click', ALERT_LAYERS, (e) => {
-      const id = alertIdOf(e.features);
+    // Caixa de 24 px em volta do toque: o marcador tem 9 a 14 px de raio, pouco para o dedo.
+    // No nativo, o `GeoJSONSource` já usa 44 px. Filtra as camadas a cada toque porque trocar o estilo as recria.
+    m.on('click', (e: MapMouseEvent) => {
+      const layers = ALERT_LAYERS.filter((id) => m.getLayer(id));
+      if (!layers.length) return;
+      const { x, y } = e.point;
+      const id = alertIdOf(m.queryRenderedFeatures([[x - 12, y - 12], [x + 12, y + 12]], { layers }));
       if (id) latest.current.onAlertPress?.(id);
     });
     m.on('mouseenter', ALERT_LAYERS, () => (m.getCanvas().style.cursor = 'pointer'));

@@ -92,6 +92,8 @@ async function send<T>(baseUrl: string, method: Method, path: string, body: unkn
 
 const currentUrl = () => normalizeApiUrl(useSettings.getState().apiUrl);
 
+const incompleteResponse = () => new ApiError(0, 'Resposta incompleta do servidor. Tente de novo.');
+
 /** O AsyncStorage carrega depois do primeiro render; sem esperar, o app registraria um usuário novo. */
 async function hydrated(): Promise<void> {
   if (useSettings.persist.hasHydrated()) return;
@@ -254,10 +256,19 @@ export const api = {
   reroute: (tripId: string, planId: string, routeIndex: number) =>
     request<{ seq: number }>('POST', `/trips/${tripId}/reroute`, { planId, routeIndex }),
   finishTrip: (tripId: string) => request<FinishTripResponse>('POST', `/trips/${tripId}/finish`, {}),
-  alerts: (b: { minLat: number; minLon: number; maxLat: number; maxLon: number }) =>
-    request<{ alerts: RoadAlert[] }>('GET', `/alerts?minLat=${b.minLat}&minLon=${b.minLon}&maxLat=${b.maxLat}&maxLon=${b.maxLon}`),
+  // `send` devolve `{}` quando o corpo de um 2xx não pode ser lido (conexão caiu no meio da leitura).
+  // Aqui isso vira erro: uma lista vazia apagaria os alertas do mapa, e um voto `{}` pareceria aceito.
+  alerts: async (b: { minLat: number; minLon: number; maxLat: number; maxLon: number }) => {
+    const r = await request<{ alerts?: RoadAlert[] }>('GET', `/alerts?minLat=${b.minLat}&minLon=${b.minLon}&maxLat=${b.maxLat}&maxLon=${b.maxLon}`);
+    if (!Array.isArray(r.alerts)) throw incompleteResponse();
+    return { alerts: r.alerts };
+  },
   report: (type: RoadAlert['type'], p: LatLon) => request<RoadAlert>('POST', '/alerts', { type, lat: p.lat, lon: p.lon }),
-  vote: (id: string, up: boolean) => request<RoadAlert>('POST', `/alerts/${id}/vote`, { up }),
+  vote: async (id: string, up: boolean) => {
+    const a = await request<Partial<RoadAlert>>('POST', `/alerts/${id}/vote`, { up });
+    if (typeof a.id !== 'string') throw incompleteResponse();
+    return a as RoadAlert;
+  },
   insights: () => request<Insights>('GET', '/insights'),
   narrative: () => request<{ text: string | null; provider: string }>('POST', '/insights/narrative', {}, 40000),
   privacy: () => request<Privacy>('GET', '/privacy'),

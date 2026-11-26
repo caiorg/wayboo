@@ -52,24 +52,30 @@ export function alertsByIds(alerts: RoadAlert[], ids: readonly string[]): RoadAl
 
 const totalVotes = (a: RoadAlert) => a.upvotes + a.downvotes;
 
+function pick(cur: RoadAlert, a: RoadAlert): RoadAlert {
+  const [win, lose] = totalVotes(cur) > totalVotes(a) ? [cur, a] : [a, cur];
+  return win.myVote === undefined && lose.myVote !== undefined ? { ...win, mine: lose.mine, myVote: lose.myVote } : win;
+}
+
 /**
- * Junta as cópias de cada alerta vindas de várias fontes (plano, alertas ao redor, respostas de voto).
+ * Junta as cópias de cada alerta vindas de várias fontes (plano, alertas ao redor).
  * Os contadores só sobem, então fica a cópia com mais votos e, no empate, a da fonte mais recente.
  * Uma cópia sem `myVote` (alertas do plano em servidor antigo, por exemplo) herda o da outra.
+ * `patches` (respostas de voto) só corrigem alertas presentes nas fontes: um alerta que o servidor
+ * deixou de mandar não volta ao mapa por causa de uma resposta antiga.
  * Tira os expirados e os de `gone`, que o servidor disse não existirem mais.
  */
-export function mergeAlerts(sources: RoadAlert[][], gone: ReadonlySet<string>, now = Date.now()): RoadAlert[] {
+export function mergeAlerts(sources: RoadAlert[][], gone: ReadonlySet<string>, now = Date.now(), patches: RoadAlert[] = []): RoadAlert[] {
   const byId = new Map<string, RoadAlert>();
   for (const list of sources) {
     for (const a of list) {
       const cur = byId.get(a.id);
-      if (!cur) {
-        byId.set(a.id, a);
-        continue;
-      }
-      const [win, lose] = totalVotes(cur) > totalVotes(a) ? [cur, a] : [a, cur];
-      byId.set(a.id, win.myVote === undefined && lose.myVote !== undefined ? { ...win, mine: lose.mine, myVote: lose.myVote } : win);
+      byId.set(a.id, cur ? pick(cur, a) : a);
     }
+  }
+  for (const a of patches) {
+    const cur = byId.get(a.id);
+    if (cur) byId.set(a.id, pick(cur, a));
   }
   return [...byId.values()].filter((a) => !gone.has(a.id) && Date.parse(a.expiresAt) > now);
 }
