@@ -115,6 +115,27 @@ describe('trânsito ao vivo', () => {
     expect(etaOf(await plan(observer)).durationS).toBeCloseTo(ROUTE.baseDurationS, 3);
   });
 
+  it('um lote novo que chega atrasado não renova as medidas já gravadas', async () => {
+    const user = await register();
+    await call(user, 'PUT', '/privacy', { shareCrowd: true });
+    const p = await plan(user);
+    const { body: trip } = await call<{ tripId: string }>(user, 'POST', '/trips', { planId: p.planId, routeIndex: 0, timeZone: TZ });
+    const r = p.routes[0]!.route;
+    const samples = [...simulateDrive(r, r.segments.map((s) => s.baseDurationS * 2), Date.now() + 1000, 2)];
+    const half = Math.floor(samples.length / 2);
+    const post = async (batch: typeof samples) =>
+      expect((await call(user, 'POST', `/trips/${trip.tripId}/samples`, { samples: batch })).status).toBe(200);
+    await post(samples.slice(0, half));
+    const first = new Map(liveRows(user.userId).map((row) => [row.seg, row.t]));
+    expect(first.size).toBeGreaterThan(0);
+    // A segunda metade chega 5 min depois do que deveria (aparelho sem rede).
+    vi.setSystemTime(Date.now() + samples.at(-1)!.t - samples[half - 1]!.t + 5 * MIN);
+    await post(samples.slice(half));
+    const after = liveRows(user.userId);
+    expect(after.length).toBeGreaterThan(first.size);
+    for (const row of after) if (first.has(row.seg)) expect(row.t).toBe(first.get(row.seg));
+  });
+
   it('a rotina de retenção apaga as observações vencidas', async () => {
     await driving(true);
     expect(liveRows().length).toBeGreaterThan(0);

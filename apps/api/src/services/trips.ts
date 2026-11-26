@@ -101,7 +101,7 @@ export function addSamples(userId: string, tripId: string, samples: TraceSample[
   if (batchLastT > prevLastT && getShareCrowd(userId)) {
     // O ao vivo é melhor esforço: uma falha aqui não pode recusar as amostras, que o app reenviaria.
     try {
-      recordLiveTraffic(userId, tripId, batchLastT);
+      recordLiveTraffic(userId, tripId, prevLastT, batchLastT);
     } catch (e) {
       console.error('Falha ao medir o trânsito ao vivo', e);
     }
@@ -115,18 +115,20 @@ const LIVE_LOOKBACK_MS = LIVE_WINDOW_MS + 5 * 60_000;
 /**
  * Mede os trechos que o usuário (com opt-in) terminou nos últimos 15 min na etapa atual da viagem
  * e grava no trânsito ao vivo. Roda a cada envio de amostras, que o app faz a cada 15 s.
- * `lastT` é a amostra mais recente do lote, no relógio do aparelho, e é maior que todas as anteriores da viagem.
- * Uma amostra com horário absurdo no futuro faz a viagem parar de contribuir, sem gravar medida errada.
+ * `lastT` é a amostra mais recente do lote, no relógio do aparelho, e é maior que `prevLastT`, a mais recente
+ * dos lotes anteriores. Uma amostra com horário absurdo no futuro faz a viagem parar de contribuir, sem gravar
+ * medida errada. Só entram os trechos terminados depois de `prevLastT`: os outros já foram medidos com o lote
+ * anterior, e medir de novo com um lote atrasado daria a eles um instante mais recente.
  */
-function recordLiveTraffic(userId: string, tripId: string, lastT: number, now = Date.now()): void {
+function recordLiveTraffic(userId: string, tripId: string, prevLastT: number, lastT: number, now = Date.now()): void {
   const leg = db.prepare('SELECT * FROM trip_legs WHERE trip_id = ? ORDER BY seq DESC LIMIT 1').get(tripId) as Row | undefined;
   if (!leg) return;
   const route = getPlan(userId, String(leg.plan_id))?.routes[Number(leg.route_index)]?.route;
   if (!route) return;
   // Como em `finishTrip`, a etapa começa em `started_at` do servidor, comparado ao `t` das amostras.
   const samples = getSamples(tripId, Math.max(Number(leg.started_at) - 5000, lastT - LIVE_LOOKBACK_MS)).filter((s) => s.t <= lastT);
-  const trace = analyzeTrace(route, samples);
-  saveLiveObservations(userId, liveObservations(route, trace.observations, lastT, now), now);
+  const fresh = analyzeTrace(route, samples).observations.filter((o) => o.enteredAt + o.durationS * 1000 > prevLastT);
+  saveLiveObservations(userId, liveObservations(route, fresh, lastT, now), now);
 }
 
 export function rerouteTrip(userId: string, tripId: string, planId: string, routeIndex: number): { seq: number } {
