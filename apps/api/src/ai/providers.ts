@@ -9,9 +9,25 @@ export interface LlmProvider {
   name: string;
   model: string;
   generateObject<S extends z.ZodType>(args: { system: string; prompt: string; schema: S; schemaName: string }): Promise<z.infer<S>>;
+  /**
+   * Provedor com a chave do usuário (BYOK). `configError` converte o erro de chave, crédito ou modelo num erro para o
+   * usuário; `summary` descreve a falha para o log sem o texto do provedor, que pode ecoar parte da chave.
+   */
+  userKey?: { configError(e: unknown): Error | null; summary(e: unknown): string };
 }
 
-class AiError extends Error {}
+/** `status`: código HTTP do erro, também quando o OpenRouter o manda no corpo de um HTTP 200. */
+export class AiError extends Error {
+  override name = 'AiError';
+  constructor(
+    message: string,
+    public status?: number,
+  ) {
+    super(message);
+  }
+}
+
+type Fetch = typeof globalThis.fetch;
 
 /**
  * Memoiza `load`. Se falhar, a próxima chamada tenta de novo.
@@ -26,11 +42,14 @@ function lazy<T>(load: () => Promise<T>): () => Promise<T> {
     }));
 }
 
-function anthropicProvider(model: string): LlmProvider {
+/**
+ * Sem `apiKey`, o SDK resolve ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN ou o perfil do `ant auth login`. Com `apiKey`,
+ * o SDK não lê nenhuma credencial do ambiente; com `baseURL`, ignora ANTHROPIC_BASE_URL.
+ */
+export function anthropicProvider(model: string, opts: { apiKey?: string; baseURL?: string; fetch?: Fetch; logLevel?: 'off' } = {}): LlmProvider {
   const client = lazy(async () => {
     const [{ default: Sdk }, { betaZodOutputFormat }] = await Promise.all([import('@anthropic-ai/sdk'), import('@anthropic-ai/sdk/helpers/beta/zod')]);
-    // Sem argumentos o SDK resolve ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN ou o perfil do `ant auth login`.
-    return { sdk: new Sdk({ timeout: config.ai.timeoutMs, maxRetries: 1 }), betaZodOutputFormat };
+    return { sdk: new Sdk({ ...opts, timeout: config.ai.timeoutMs, maxRetries: 1 }), betaZodOutputFormat };
   });
   return {
     name: 'anthropic',
@@ -55,8 +74,6 @@ function anthropicProvider(model: string): LlmProvider {
   };
 }
 
-type Fetch = typeof globalThis.fetch;
-
 interface OpenAiCompatibleOptions {
   name: string;
   model: string;
@@ -68,6 +85,10 @@ interface OpenAiCompatibleOptions {
   fetch?: Fetch;
   /** Roda antes de cada chamada; lança para desistir sem gastar a requisição. */
   preflight?: () => Promise<void>;
+  /** Não lê `OPENAI_*` do ambiente: com a chave do usuário, a organização e o projeto do servidor não vão junto. */
+  ignoreEnv?: boolean;
+  /** `off` cala o log do SDK, que em `debug` imprime o corpo das respostas de erro. */
+  logLevel?: 'off';
 }
 
 const BodyError = z.object({ code: z.union([z.number(), z.string()]).optional(), message: z.string() });
@@ -81,11 +102,12 @@ function bodyError(res: unknown): AiError | null {
   const parsed = ErrorEnvelope.safeParse(res);
   const err = parsed.success ? (parsed.data.error ?? parsed.data.choices?.[0]?.error) : undefined;
   if (!err) return null;
-  return new AiError(`Erro do provedor${err.code == null ? '' : ` ${err.code}`}: ${err.message.slice(0, 300)}`);
+  const status = typeof err.code === 'number' && Number.isInteger(err.code) ? err.code : undefined;
+  return new AiError(`Erro do provedor${err.code == null ? '' : ` ${err.code}`}: ${err.message.slice(0, 300)}`, status);
 }
 
 /** OpenAI e qualquer servidor compatível (Ollama, vLLM, LM Studio, OpenRouter) via `baseURL`. */
-function openAiCompatibleProvider(o: OpenAiCompatibleOptions): LlmProvider {
+export function openAiCompatibleProvider(o: OpenAiCompatibleOptions): LlmProvider {
   const client = lazy(async () => {
     const [{ default: Sdk }, { zodResponseFormat }, { parseChatCompletion }] = await Promise.all([
       import('openai'),
@@ -93,6 +115,8 @@ function openAiCompatibleProvider(o: OpenAiCompatibleOptions): LlmProvider {
       import('openai/lib/parser'),
     ]);
     const sdk = new Sdk({
+      ...(o.ignoreEnv ? { organization: null, project: null, adminAPIKey: null } : {}),
+      ...(o.logLevel ? { logLevel: o.logLevel } : {}),
       apiKey: o.apiKey,
       baseURL: o.baseURL,
       defaultHeaders: o.defaultHeaders,
@@ -174,8 +198,8 @@ export async function openRouterStructuredOutputSupport(
 }
 
 /** OpenRouter via API compatível com a OpenAI. Exportado para reuso com chave do usuário. */
-export function openRouterProvider(opts: { model: string; apiKey: string; baseURL?: string; fetch?: Fetch }): LlmProvider {
-  const { model, apiKey, baseURL = OPENROUTER_BASE_URL, fetch: baseFetch = globalThis.fetch } = opts;
+export function openRouterProvider(opts: { model: string; apiKey: string; baseURL?: string; fetch?: Fetch; logLevel?: 'off' }): LlmProvider {
+  const { model, apiKey, baseURL = OPENROUTER_BASE_URL, fetch: baseFetch = globalThis.fetch, logLevel } = opts;
   assertSecureBaseUrl(baseURL);
   // A API não redireciona; seguir um 307/308 reenviaria chave e prompt para um destino não validado (talvez http://).
   const fetchImpl: Fetch = (input, init) => baseFetch(input, { ...init, redirect: 'error' });
@@ -186,6 +210,9 @@ export function openRouterProvider(opts: { model: string; apiKey: string; baseUR
     apiKey,
     baseURL,
     fetch: fetchImpl,
+    // OPENAI_ORG_ID e OPENAI_PROJECT_ID são da OpenAI: não vão para o OpenRouter.
+    ignoreEnv: true,
+    logLevel,
     defaultHeaders: OPENROUTER_HEADERS,
     // `require_parameters`: sem isso o roteador pode mandar para um provedor que ignora `response_format`.
     // `data_collection: 'deny'`: o pedido pode ter endereços; só provedores que não guardam nem treinam com o prompt.
@@ -207,13 +234,22 @@ function create(): LlmProvider | null {
 
 export const llm = create();
 
-/** Executa com prazo; em falha retorna null para o chamador usar o caminho determinístico. */
-export async function tryLlm<T>(fn: (p: LlmProvider) => Promise<T>, log: (msg: string) => void): Promise<T | null> {
-  if (!llm) return null;
+/**
+ * Executa com prazo; em falha retorna null para o chamador usar o caminho determinístico. `provider` omitido usa o do
+ * servidor. Com a chave do usuário, erro de chave, crédito ou modelo sobe para ele em vez de cair nas regras.
+ */
+export async function tryLlm<T>(fn: (p: LlmProvider) => Promise<T>, log: (msg: string) => void, provider: LlmProvider | null = llm): Promise<T | null> {
+  if (!provider) return null;
   try {
-    return await fn(llm);
+    return await fn(provider);
   } catch (e) {
-    log(`IA indisponível (${llm.name}/${llm.model}): ${e instanceof Error ? e.message : String(e)}`);
+    if (provider.userKey) {
+      const err = provider.userKey.configError(e);
+      if (err) throw err;
+      log(`IA do usuário indisponível (${provider.name}/${provider.model}): ${provider.userKey.summary(e)}`);
+      return null;
+    }
+    log(`IA indisponível (${provider.name}/${provider.model}): ${e instanceof Error ? e.message : String(e)}`);
     return null;
   }
 }

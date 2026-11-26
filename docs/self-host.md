@@ -165,7 +165,7 @@ Se outro proxy já termina o TLS, deixe `GATEWAY_ADDRESS=:80` e publique o gatew
 ## O que ainda chama serviço externo
 
 - Clima: a API consulta o Open-Meteo (`OPEN_METEO_URL`). Sem acesso, o ETA segue sem o fator clima.
-- IA: só se o `.env` configurar um provedor remoto. `AI_PROVIDER=ollama` com um Ollama na rede local mantém tudo dentro.
+- IA: só se o `.env` configurar um provedor remoto, ou se o cliente mandar a chave do usuário nos cabeçalhos `x-ai-*`. Nesse caso, a API repassa a chave ao provedor escolhido sem gravá-la (ver `docs/privacidade.md`). `AI_PROVIDER=ollama` com um Ollama na rede local mantém tudo dentro.
 - Preparo: extrato (Geofabrik ou a URL configurada), dados auxiliares do Planetiler, índice do Photon, estilos, fontes e sprites do OpenFreeMap e a tabela de velocidades padrão do Valhalla. Tudo isso é baixado uma vez e fica nos volumes.
 
 O índice do Photon não se atualiza sozinho (`UPDATE_STRATEGY=DISABLED`), porque a atualização baixaria o índice de novo de um espelho externo. Para atualizar, apague o volume e suba de novo:
