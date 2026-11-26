@@ -31,6 +31,14 @@ export interface Maneuver {
   lanes?: Lane[];
 }
 
+/** Trecho da rota com limite de velocidade conhecido, nos índices de `Route.geometry` (fim exclusivo). */
+export interface SpeedLimitSpan {
+  beginIdx: number;
+  endIdx: number;
+  /** Limite em km/h, vindo da tag `maxspeed` do OSM. */
+  kmh: number;
+}
+
 /** Trecho de ~300 m da rota. É a unidade em que o ETA aprende. */
 export interface RouteSegment {
   /** Chave estável e direcional: geohash7(início) > geohash7(fim). */
@@ -53,6 +61,8 @@ export interface Route {
   highwayShare: number;
   segments: RouteSegment[];
   provider: string;
+  /** Trechos com limite conhecido, em ordem. Ausente se o roteador não respondeu os limites. */
+  speedLimits?: SpeedLimitSpan[];
 }
 
 export type DayType = 'weekday' | 'saturday' | 'sunday';

@@ -1,6 +1,7 @@
 import type { PlanRequest, PlanResponse } from './api';
 import { cumulativeDistances, haversine, projectOnPolyline, type Coord, type Projection } from './geo';
 import { spokenInstruction } from './instructions';
+import { isOverSpeedLimit, speedLimitSpanAt } from './speed';
 import type { LatLon, Maneuver, Route, RouteOptions } from './types';
 
 export interface NavFix {
@@ -33,6 +34,12 @@ export interface NavState {
   progress: number;
   /** Razão entre ritmo real e previsto até aqui (1 = no previsto). */
   paceRatio: number;
+  /** Limite do trecho atual em km/h, ou null se o OSM não tem o dado ou o carro saiu da rota. */
+  speedLimitKmh: number | null;
+  /** Velocidade do GPS em km/h, ou null se o aparelho não informou. */
+  speedKmh: number | null;
+  /** Acima do limite em duas leituras seguidas. */
+  overSpeedLimit: boolean;
 }
 
 export interface NavigatorOptions {
@@ -40,6 +47,9 @@ export interface NavigatorOptions {
   segmentDurationsS?: number[];
   startedAt?: number;
 }
+
+/** Pausa mínima entre um anúncio e o aviso de velocidade, para não cortar a instrução falada. */
+const SPEECH_GAP_MS = 6000;
 
 export function createNavigator(route: Route, opts: NavigatorOptions = {}) {
   const coords = route.geometry;
@@ -56,6 +66,8 @@ export function createNavigator(route: Route, opts: NavigatorOptions = {}) {
   let badFixes = 0;
   let startedAt = opts.startedAt ?? null;
   const spoken = new Set<string>();
+  let overFixes = 0;
+  let lastAnnouncedAt = -Infinity;
 
   const predictedRemaining = (along: number): number => {
     const i = route.segments.findIndex((s) => along < s.endM);
@@ -125,6 +137,25 @@ export function createNavigator(route: Route, opts: NavigatorOptions = {}) {
       }
     }
 
+    // Com o fix longe da rota não dá para saber em que via o carro está.
+    const speedSpan = offRoute || proj.offsetM > tolerance ? null : speedLimitSpanAt(route.speedLimits, lastIdx);
+    const speedLimitKmh = speedSpan?.kmh ?? null;
+    overFixes = isOverSpeedLimit(fix.speed, speedLimitKmh) ? overFixes + 1 : 0;
+    const overSpeedLimit = overFixes >= 2;
+    if (announcement !== null) lastAnnouncedAt = fix.t;
+    // Um aviso por trecho de limite. Espera a fala anterior terminar: o app interrompe a fala em curso.
+    else if (
+      overSpeedLimit &&
+      speedSpan &&
+      !arrived &&
+      fix.t - lastAnnouncedAt >= SPEECH_GAP_MS &&
+      !spoken.has(`speed:${speedSpan.beginIdx}`)
+    ) {
+      spoken.add(`speed:${speedSpan.beginIdx}`);
+      announcement = `Atenção: limite de ${speedSpan.kmh} km/h`;
+      lastAnnouncedAt = fix.t;
+    }
+
     return {
       alongM: along,
       remainingM,
@@ -142,6 +173,9 @@ export function createNavigator(route: Route, opts: NavigatorOptions = {}) {
       announcement,
       progress: total > 0 ? along / total : 1,
       paceRatio,
+      speedLimitKmh,
+      speedKmh: fix.speed == null ? null : Math.round(fix.speed * 3.6),
+      overSpeedLimit,
     };
   }
 

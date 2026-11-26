@@ -3,6 +3,7 @@ export * from './types';
 export * from './route';
 export * from './instructions';
 export * from './lanes';
+export * from './speed';
 export * from './navigation';
 export * from './simulate';
 export * from './api';
