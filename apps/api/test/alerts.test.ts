@@ -59,10 +59,10 @@ describe('GET /alerts', () => {
     expect(a).not.toHaveProperty('myVote');
   });
 
-  it('com token, a resposta não fica em cache compartilhado', async () => {
+  it('com token, a resposta não fica em cache', async () => {
     const { reporter, p } = await reported();
     const res = await call(reporter, 'GET', box(p));
-    expect(res.headers['cache-control']).toBe('private, no-store');
+    expect(res.headers['cache-control']).toBe('no-store');
   });
 
   it('token inválido recebe 401', async () => {

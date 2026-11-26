@@ -273,12 +273,11 @@ export async function buildApp(opts: { logger?: boolean; logStream?: Writable } 
   // ---------- alertas da comunidade ----------
 
   // Sem token, a lista é pública. Com token, cada alerta traz `mine` e `myVote` de quem pergunta.
-  app.get('/alerts', async (req, reply) => {
+  app.get('/alerts', async (req) => {
     const q = z
       .object({ minLat: z.coerce.number(), minLon: z.coerce.number(), maxLat: z.coerce.number(), maxLon: z.coerce.number() })
       .parse(req.query);
     const viewer = req.headers.authorization === undefined ? undefined : userOf(req);
-    if (viewer) reply.header('cache-control', 'private, no-store');
     return { alerts: alertsInBox(q.minLat, q.minLon, q.maxLat, q.maxLon, Date.now(), viewer) };
   });
 

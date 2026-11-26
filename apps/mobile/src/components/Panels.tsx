@@ -1,5 +1,5 @@
 import { ALERT_TYPES, formatDurationPtBR, type AlertType, type FinishTripResponse, type RoadAlert, type Suggestion } from '@wayboo/core';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
 import { timeAgoPtBR, voteStatus } from '@/lib/alertGroups';
 import type { ReportAccuracy } from '@/lib/gpsAccuracy';
 import { ALERT_COLORS, ALERT_ICONS, ALERT_LABELS, useTheme } from '@/lib/theme';
@@ -75,24 +75,26 @@ export function AlertSheet({
   onClose: () => void;
 }) {
   const t = useTheme();
+  const { height } = useWindowDimensions();
   const first = alerts[0];
   const title = alerts.length === 1 && first ? ALERT_LABELS[first.type] : `${alerts.length} alertas neste ponto`;
   return (
     <Card style={{ gap: 12 }}>
       <View style={styles.row}>
-        <T variant="title" style={{ flex: 1 }}>
-          {title}
-        </T>
+        <View style={{ flex: 1, gap: 2 }}>
+          <T variant="title">{title}</T>
+          <T variant="caption">Confirmar renova a validade. Negações tiram o alerta do mapa. O voto não pode ser trocado.</T>
+        </View>
         <Pressable accessibilityRole="button" accessibilityLabel="Fechar" onPress={onClose} hitSlop={10}>
           <Icon name="close" color={t.textMuted} />
         </Pressable>
       </View>
-      <ScrollView style={{ maxHeight: 360 }} contentContainerStyle={{ gap: 10 }}>
+      {/* Em telas baixas, a lista rola em vez de a folha cobrir o mapa inteiro. */}
+      <ScrollView style={{ maxHeight: Math.min(360, height * 0.42) }} contentContainerStyle={{ gap: 10 }}>
         {alerts.map((a) => (
           <AlertRow key={a.id} alert={a} pending={pending.has(a.id)} onVote={(up) => onVote(a, up)} />
         ))}
       </ScrollView>
-      <T variant="caption">Confirmar renova a validade do alerta. Negações seguidas tiram o alerta do mapa. O voto não pode ser trocado.</T>
     </Card>
   );
 }
@@ -122,20 +124,20 @@ function AlertRow({ alert: a, pending, onVote }: { alert: RoadAlert; pending: bo
       {status === 'open' ? (
         <View style={styles.voteRow}>
           <Button
-            label="Ainda está lá"
+            label="Confirmar"
             icon="thumb-up-outline"
             kind="secondary"
             loading={pending}
             onPress={() => onVote(true)}
-            style={styles.voteButton}
+            style={[styles.voteButton, { backgroundColor: t.surface }]}
           />
           <Button
-            label="Não está mais"
+            label="Negar"
             icon="thumb-down-outline"
             kind="secondary"
             disabled={pending}
             onPress={() => onVote(false)}
-            style={styles.voteButton}
+            style={[styles.voteButton, { backgroundColor: t.surface }]}
           />
         </View>
       ) : (
@@ -229,5 +231,5 @@ const styles = StyleSheet.create({
   learnBox: { flexDirection: 'row', gap: 10, padding: 12, borderRadius: 14 },
   alertRow: { gap: 10, padding: 12, borderRadius: 16 },
   voteRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  voteButton: { flexGrow: 1, flexBasis: 140, height: 44, paddingHorizontal: 12 },
+  voteButton: { flexGrow: 1, flexBasis: 120, height: 44, paddingHorizontal: 12 },
 });
