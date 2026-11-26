@@ -3,6 +3,8 @@ import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { api } from '@/lib/api';
+// Importado na abertura para definir a task de localização antes de o sistema entregar leituras.
+import { stopBackgroundLocation } from '@/lib/backgroundLocation';
 import { settingsHydration, useSettings } from '@/lib/store';
 import { useTheme } from '@/lib/theme';
 
@@ -14,6 +16,11 @@ export default function RootLayout() {
 
   useEffect(() => {
     void settingsHydration.then(() => setHydrated(true));
+  }, []);
+
+  useEffect(() => {
+    // Nenhuma navegação está ativa na abertura: desliga o GPS que uma sessão encerrada no meio da viagem deixou ligado.
+    void stopBackgroundLocation();
   }, []);
 
   useEffect(() => {

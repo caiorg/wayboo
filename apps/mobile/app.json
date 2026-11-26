@@ -31,7 +31,12 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "O Wayboo usa sua localização para navegar e aprender seus trajetos frequentes."
+          "locationWhenInUsePermission": "O Wayboo usa sua localização para navegar, inclusive com a tela bloqueada durante a navegação, e para aprender seus trajetos frequentes.",
+          "locationAlwaysAndWhenInUsePermission": false,
+          "locationAlwaysPermission": false,
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": false,
+          "isAndroidForegroundServiceEnabled": true
         }
       ],
       "expo-secure-store"

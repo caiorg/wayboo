@@ -21,8 +21,9 @@ import {
   type Suggestion,
 } from '@wayboo/core';
 import { parseIntent } from '../ai/planner';
+import type { LlmProvider } from '../ai/providers';
 import { config } from '../config';
-import { db, deletionTicket, getPlaces, getPrefs, getRoutineRoutes, getRoutines, saveRoutineRoutes, statsByPrefix } from '../db';
+import { db, getPlaces, getPrefs, getRoutineRoutes, getRoutines, saveRoutineRoutes, statsByPrefix } from '../db';
 import { currentWeather, geocode, STOP_QUERY, type BBox } from '../providers/geo-services';
 import { regionAt, regionalCalendar } from '../holidays';
 import { valhalla } from '../providers/routing';
@@ -45,8 +46,15 @@ function nextLocal(hhmm: string, timeZone: string, now = Date.now()): number | n
   return now + diff * 60_000;
 }
 
-export async function assistant(userId: string, text: string, origin: LatLon, timeZone: string, log: Log): Promise<AssistantResponse> {
-  const { intent, provider } = await parseIntent(text, log);
+export async function assistant(
+  userId: string,
+  text: string,
+  origin: LatLon,
+  timeZone: string,
+  log: Log,
+  ai?: LlmProvider,
+): Promise<AssistantResponse> {
+  const { intent, provider } = await parseIntent(text, log, ai);
   const fail = (message: string): AssistantResponse => ({ intent, provider, plan: null, stops: [], message });
 
   let destination: LatLon | null = null;
@@ -147,15 +155,12 @@ const routing = new Map<string, Promise<PlanResponse>>();
  * se afastaram do raio dos pontos usados quando foram guardadas.
  * Pedidos simultâneos da mesma rotina esperam a chamada em andamento e usam a rota que ela guardou;
  * se ela falhar, recebem o mesmo erro em vez de chamar o roteador de novo.
- * `ticket` vem de `deletionTicket()` no início do pedido: as esperas aqui (chamada em andamento, clima)
- * não podem deixar gravar o plano de um usuário apagado nesse meio tempo.
  */
 async function routinePlan(
   userId: string,
   originId: string,
   destId: string,
   req: Parameters<typeof plan>[1],
-  ticket: number,
 ): Promise<PlanResponse> {
   const key = JSON.stringify([userId, originId, destId]);
   for (let running = routing.get(key); running; running = routing.get(key)) await running;
@@ -171,9 +176,9 @@ async function routinePlan(
     // Ids novos: cada plano tem as próprias rotas, como no caminho que chama o roteador.
     const routes = saved.routes.map((r) => ({ ...r, id: randomUUID() }));
     const [weather, region] = await Promise.all([currentWeather(req.origin.lat, req.origin.lon), regionAt(req.origin, req.timeZone)]);
-    return evaluatePlan(userId, req, routes, weather, null, ticket, region);
+    return evaluatePlan(userId, req, routes, weather, null, region);
   }
-  const running = plan(userId, req, null, ticket)
+  const running = plan(userId, req)
     .then((result) => {
       saveRoutineRoutes(userId, originId, destId, { from: req.origin, to: req.destination, fetchedAt: now, routes: result.routes.map((r) => r.route) });
       return result;
@@ -184,7 +189,6 @@ async function routinePlan(
 }
 
 export async function suggestions(userId: string, here: LatLon, timeZone: string): Promise<Suggestion[]> {
-  const ticket = deletionTicket();
   const places = getPlaces(userId);
   const origin = matchPlace(places, here.lat, here.lon, 300);
   if (!origin) return [];
@@ -205,7 +209,7 @@ export async function suggestions(userId: string, here: LatLon, timeZone: string
       timeZone,
       options: { avoidTolls: false, avoidHighways: false, avoidFerries: false },
       reroute: false,
-    }, ticket);
+    });
     const rec = result.routes[result.recommendedIndex]!;
     const usual = db
       .prepare("SELECT AVG(actual_s) AS avg FROM (SELECT actual_s FROM trips WHERE user_id = ? AND origin_place = ? AND dest_place = ? AND status = 'done' ORDER BY started_at DESC LIMIT 20)")
