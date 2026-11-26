@@ -6,6 +6,10 @@ import { z } from 'zod';
 // teste não paga a transformação do planejador e do `@wayboo/core` dentro dos 5 s.
 import '../src/ai/planner';
 import { openRouterProvider, openRouterStructuredOutputSupport } from '../src/ai/providers';
+// O provedor importa o SDK na primeira chamada. Aqui ele carrega na fase de import, fora do prazo do primeiro teste.
+import 'openai';
+import 'openai/helpers/zod';
+import 'openai/lib/parser';
 
 const MODEL = 'openai/gpt-4o-mini';
 const KEY = 'sk-or-test';

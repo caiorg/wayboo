@@ -82,3 +82,33 @@ describe('opt-in do aprendizado coletivo', () => {
     expect((await call(await register(), 'PUT', '/privacy', { shareCrowd: 'sim' })).status).toBe(400);
   });
 });
+
+// CWE-525: o cliente não guarda cópia de resposta com dado do usuário.
+describe('cache-control', () => {
+  it('as rotas com dado pessoal respondem no-store, inclusive no erro', async () => {
+    const reg = await app.inject({ method: 'POST', url: '/auth/device', payload: { token: 'x'.repeat(43) } });
+    expect(reg.statusCode).toBe(200);
+    expect(reg.headers['cache-control']).toBe('no-store');
+
+    const user = await register();
+    const routes: [Parameters<typeof call>[1], string, number, object?][] = [
+      ['GET', '/privacy', 200],
+      ['PUT', '/privacy', 200, { shareCrowd: false }],
+      ['GET', '/insights', 200],
+      ['GET', '/devices', 200],
+      ['POST', '/plan', 200, api.planRequest],
+      ['GET', '/reverse', 400], // falha na validação, sem chamar a rede
+    ];
+    for (const [method, url, status, payload] of routes) {
+      const res = await call(user, method, url, payload);
+      expect(res.status, `${method} ${url}`).toBe(status);
+      expect(res.headers['cache-control'], `${method} ${url}`).toBe('no-store');
+    }
+
+    const anon = await app.inject({ method: 'GET', url: '/insights' });
+    expect(anon.statusCode).toBe(401);
+    expect(anon.headers['cache-control']).toBe('no-store');
+
+    expect((await app.inject({ method: 'GET', url: '/nao-existe' })).headers['cache-control']).toBe('no-store');
+  });
+});

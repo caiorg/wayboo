@@ -1,9 +1,12 @@
 import type { DayType, EtaEstimate, EtaFactor, Route, TripContext } from '../types';
 import type { HolidayCalendar } from './holidays';
+import { liveAlpha, type LiveTraffic } from './live';
 import {
   BIN_MINUTES,
   BINS_PER_DAY,
   localTime,
+  logRatio,
+  MIN_LEARN_BASE_S,
   observe,
   pool,
   shrink,
@@ -27,8 +30,9 @@ import {
  * Cada nível encolhe em direção ao de baixo quando tem poucas observações.
  * Dia útil nunca entra no fim de semana nem o contrário: sem viagens de domingo, o domingo
  * não herda o pico dos dias úteis. Sábado e domingo emprestam um ao outro.
- * Por cima disso entram fatores de contexto aprendidos (chuva, visibilidade,
- * alertas) e um resíduo por rotina origem→destino (ex.: tempo para estacionar).
+ * Por cima disso entram o trânsito ao vivo (`live.ts`), que tem prioridade sobre o histórico do trecho,
+ * fatores de contexto aprendidos (chuva, visibilidade, alertas) e um resíduo por rotina
+ * origem→destino (ex.: tempo para estacionar).
  */
 
 export type StatsMap = Map<string, DecayedStat>;
@@ -78,7 +82,6 @@ const ROOT: Shrunk = { mean: 0, variance: 0.05, w: 0 };
 const WEEKEND_SIBLING: Partial<Record<DayType, DayType>> = { saturday: 'sunday', sunday: 'saturday' };
 /** Uma observação do outro dia de fim de semana vale metade de uma do próprio dia. */
 export const WEEKEND_SIBLING_WEIGHT = 0.5;
-const MIN_LEARN_BASE_S = 2;
 
 export interface EtaInput {
   route: Route;
@@ -93,6 +96,8 @@ export interface EtaInput {
   alertPenaltyS?: number;
   /** Feriados do lugar da viagem. Sem ele, vale o padrão do fuso (`holidayCalendarFor`). */
   calendar?: HolidayCalendar;
+  /** Trânsito dos últimos 15 min (`aggregateLive`), já com o mínimo de usuários aplicado. */
+  live?: LiveTraffic;
 }
 
 interface SegmentEstimate {
@@ -173,6 +178,8 @@ export function predictEta(input: EtaInput): EtaEstimate {
   const now = departAt;
   const lt = localTime(departAt, timeZone, input.calendar);
   let elapsed = 0;
+  let histTotal = 0;
+  let liveWeighted = 0;
   let sigmaWeighted = 0;
   let confWeighted = 0;
   const segmentDurationsS: number[] = [];
@@ -181,7 +188,12 @@ export function predictEta(input: EtaInput): EtaEstimate {
     const minute = (lt.minuteOfDay + elapsed / 60) % (24 * 60);
     const bin = Math.floor(minute / BIN_MINUTES);
     const est = estimateSegment(s.key, lt.dayType, bin, user, crowd, now);
-    const dur = s.baseDurationS * Math.exp(est.mean);
+    const live = input.live?.segments.get(s.key);
+    const alpha = live ? liveAlpha(live, departAt + elapsed * 1000, input.live!.at) : 0;
+    const mean = live ? est.mean + alpha * (live.mean - est.mean) : est.mean;
+    const dur = s.baseDurationS * Math.exp(mean);
+    histTotal += s.baseDurationS * Math.exp(est.mean);
+    liveWeighted += dur * alpha;
     segmentDurationsS.push(dur);
     elapsed += dur;
     sigmaWeighted += dur * Math.sqrt(est.variance);
@@ -190,7 +202,7 @@ export function predictEta(input: EtaInput): EtaEstimate {
 
   const segTotal = elapsed;
   const factors: EtaFactor[] = [];
-  const learnedDelta = segTotal - route.baseDurationS;
+  const learnedDelta = histTotal - route.baseDurationS;
   if (Math.abs(learnedDelta) >= 30) {
     factors.push({
       kind: 'segments',
@@ -198,7 +210,18 @@ export function predictEta(input: EtaInput): EtaEstimate {
       deltaS: learnedDelta,
     });
   }
+  const liveDelta = segTotal - histTotal;
+  if (Math.abs(liveDelta) >= 30) {
+    factors.push({
+      kind: 'live',
+      label: liveDelta > 0 ? 'Trânsito agora mais lento que o normal' : 'Trânsito agora melhor que o normal',
+      deltaS: liveDelta,
+    });
+  }
 
+  // A medida ao vivo já inclui a chuva e os alertas de agora: nos trechos com ao vivo,
+  // contexto e penalidade dos alertas valem só a parte que ele não cobre.
+  const notLive = 1 - liveWeighted / Math.max(1, segTotal);
   let logMult = 0;
   let ctxVar = 0;
   for (const f of activeFlags(ctx)) {
@@ -210,7 +233,7 @@ export function predictEta(input: EtaInput): EtaEstimate {
       now,
     );
     const est = shrink(pooled, { mean: CONTEXT_PRIOR[f], variance: 0.02, w: 0 }, 3, now);
-    const scaled = f === 'alerts' ? est.mean * Math.min(3, ctx.alertsOnRoute) : est.mean;
+    const scaled = (f === 'alerts' ? est.mean * Math.min(3, ctx.alertsOnRoute) : est.mean) * notLive;
     logMult += scaled;
     ctxVar += est.variance;
     factors.push({ kind: 'context', label: CONTEXT_LABEL[f], deltaS: segTotal * (Math.exp(scaled) - 1) });
@@ -227,7 +250,7 @@ export function predictEta(input: EtaInput): EtaEstimate {
     }
   }
 
-  const penalty = input.alertPenaltyS ?? 0;
+  const penalty = (input.alertPenaltyS ?? 0) * notLive;
   if (penalty > 0) factors.push({ kind: 'alerts', label: 'Alertas da comunidade à frente', deltaS: penalty });
 
   const durationS = segTotal * Math.exp(logMult) + penalty;
@@ -282,8 +305,6 @@ export interface LearnResult {
   learnedSegments: number;
 }
 
-const clampLog = (x: number) => Math.max(-1.2, Math.min(2.5, x));
-
 const DAY_MS = 86_400_000;
 /**
  * O agregado guarda só o dia (UTC) da última atualização, nunca o horário exato em que alguém passou
@@ -316,7 +337,7 @@ export function learnFromTrip(input: LearnInput): LearnResult {
   for (const o of observations) {
     const seg = route.segments[o.index];
     if (!seg || seg.baseDurationS < MIN_LEARN_BASE_S || o.durationS <= 0) continue;
-    const x = clampLog(Math.log(o.durationS / seg.baseDurationS));
+    const x = logRatio(o.durationS, seg.baseDurationS);
     const lt = localTime(o.enteredAt, timeZone, input.calendar);
     const now = o.enteredAt;
     const weight = Math.min(1, seg.baseDurationS / 20);
@@ -340,7 +361,7 @@ export function learnFromTrip(input: LearnInput): LearnResult {
   }
 
   if (input.actualTotalS && input.actualTotalS > 0 && before.durationS > 0) {
-    const residual = clampLog(Math.log(input.actualTotalS / before.durationS));
+    const residual = logRatio(input.actualTotalS, before.durationS);
     const flags = activeFlags(ctx);
     const now = input.departAt;
     if (flags.length) {

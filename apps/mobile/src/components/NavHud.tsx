@@ -1,5 +1,14 @@
-import { formatDistancePtBR, formatDurationPtBR, maneuverIcon, type ManeuverIcon, type NavState } from '@wayboo/core';
-import { StyleSheet, View } from 'react-native';
+import {
+  formatDistancePtBR,
+  formatDurationPtBR,
+  maneuverIcon,
+  upcomingLanes,
+  type LaneIndication,
+  type LaneView,
+  type ManeuverIcon,
+  type NavState,
+} from '@wayboo/core';
+import { StyleSheet, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '@/lib/theme';
 import { Card, Chip, Icon, IconButton, T, type IconName } from './ui';
@@ -19,10 +28,99 @@ const ICON: Record<ManeuverIcon, IconName> = {
   arrive: 'flag-checkered',
 };
 
+const LANE_ICON: Record<LaneIndication, IconName> = {
+  uturn: 'arrow-u-left-top',
+  'sharp-left': 'arrow-left-bottom',
+  left: 'arrow-left-top',
+  'slight-left': 'arrow-top-left',
+  'merge-left': 'arrow-collapse-left',
+  through: 'arrow-up',
+  'merge-right': 'arrow-collapse-right',
+  'slight-right': 'arrow-top-right',
+  right: 'arrow-right-top',
+  'sharp-right': 'arrow-right-bottom',
+};
+
+const LANE_LABEL: Record<LaneIndication, string> = {
+  uturn: 'retorno',
+  'sharp-left': 'esquerda fechada',
+  left: 'esquerda',
+  'slight-left': 'levemente à esquerda',
+  'merge-left': 'convergência à esquerda',
+  through: 'em frente',
+  'merge-right': 'convergência à direita',
+  'slight-right': 'levemente à direita',
+  right: 'direita',
+  'sharp-right': 'direita fechada',
+};
+
+function laneLabel(l: LaneView, i: number): string {
+  const arrows = l.indications.length ? l.indications.map((d) => LANE_LABEL[d]).join(', ') : 'sem marcação';
+  const state = l.state === 'active' ? ', recomendada' : l.state === 'valid' ? ', também serve' : '';
+  return `Faixa ${i + 1}: ${arrows}${state}`;
+}
+
+/** Acima disso as faixas dividem a largura da tela em vez de ter largura fixa. */
+const COMPACT_LANES = 6;
+
+/**
+ * Tamanho das setas para que todas caibam na faixa: a largura da tela, menos as margens da linha,
+ * dividida entre as faixas e depois entre as setas de cada uma. Nunca passa do tamanho normal.
+ */
+function laneIconSize(screenWidth: number, laneCount: number, arrows: number, compact: boolean): number {
+  const gap = compact ? 2 : 4;
+  const row = screenWidth - 2 * 12 - 2 * 6 - gap * (laneCount - 1);
+  const inner = row / laneCount - 2 * (compact ? 1 : 4) - 2 * 2;
+  // Sem piso: num caso extremo as setas ficam pequenas, mas nunca cortadas.
+  return Math.max(1, Math.min(arrows > 1 ? 18 : 22, Math.floor(inner / arrows)));
+}
+
+/** Faixas da próxima manobra. A faixa recomendada fica clara; as que também servem ficam contornadas. */
+function LaneStrip({ lanes, background }: { lanes: LaneView[]; background: string }) {
+  // Com muitas faixas, 38 pt por faixa passam da largura do celular: elas dividem a linha e as setas encolhem.
+  const compact = lanes.length > COMPACT_LANES;
+  const { width } = useWindowDimensions();
+  // Sem recomendação do roteador, todas as setas ficam claras; com ela, apagam as que não seguem a rota.
+  const guided = lanes.some((l) => l.state !== 'other');
+  const arrowColor = (l: LaneView, d: LaneIndication) => {
+    if (!guided) return '#CFF7E8';
+    if (l.use !== d) return '#7FB8A4';
+    return l.state === 'active' ? '#0B6B4F' : '#FFFFFF';
+  };
+  return (
+    <View
+      style={[styles.lanes, compact && styles.lanesCompact, { backgroundColor: background }]}
+      accessible
+      accessibilityLabel={`Faixas da próxima manobra, da esquerda para a direita. ${lanes.map(laneLabel).join('. ')}`}
+    >
+      {lanes.map((l, i) => (
+        <View
+          key={i}
+          style={[
+            styles.lane,
+            compact && styles.laneCompact,
+            l.state === 'active' && { backgroundColor: '#FFFFFF' },
+            l.state === 'valid' && { borderColor: '#FFFFFF' },
+          ]}
+        >
+          {l.indications.length ? (
+            l.indications.map((d) => (
+              <Icon key={d} name={LANE_ICON[d]} size={laneIconSize(width, lanes.length, l.indications.length, compact)} color={arrowColor(l, d)} />
+            ))
+          ) : (
+            <View style={styles.laneBlank} />
+          )}
+        </View>
+      ))}
+    </View>
+  );
+}
+
 export function NavBanner({ nav, rerouting, simulated }: { nav: NavState | null; rerouting: boolean; simulated: boolean }) {
   const t = useTheme();
   const insets = useSafeAreaInsets();
   const m = nav?.nextManeuver;
+  const lanes = nav ? upcomingLanes(nav) : null;
   return (
     <View style={[styles.top, { paddingTop: insets.top + 8 }]} pointerEvents="box-none">
       <View style={[styles.banner, { backgroundColor: t.dark ? '#0E3A2F' : '#0B6B4F' }]}>
@@ -36,6 +134,7 @@ export function NavBanner({ nav, rerouting, simulated }: { nav: NavState | null;
           </T>
         </View>
       </View>
+      {lanes ? <LaneStrip lanes={lanes} background={t.dark ? '#0A2A22' : '#08533D'} /> : null}
       {nav?.thenManeuver ? (
         <View style={[styles.then, { backgroundColor: t.dark ? '#0A2A22' : '#08533D' }]}>
           <T variant="caption" color="#CFF7E8">
@@ -97,6 +196,21 @@ const styles = StyleSheet.create({
   top: { position: 'absolute', top: 0, left: 0, right: 0, paddingHorizontal: 12, gap: 6 },
   banner: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 16, borderRadius: 22 },
   then: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14 },
+  lanes: { flexDirection: 'row', alignSelf: 'center', maxWidth: '100%', gap: 4, padding: 6, borderRadius: 14 },
+  lane: {
+    minWidth: 38,
+    height: 38,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: 'transparent',
+  },
+  lanesCompact: { alignSelf: 'stretch', gap: 2 },
+  laneCompact: { flex: 1, minWidth: 0, paddingHorizontal: 1, overflow: 'hidden' },
+  laneBlank: { width: 3, height: 18, borderRadius: 2, backgroundColor: '#7FB8A4' },
   pills: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   bottomWrap: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 12 },
   bottom: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12 },

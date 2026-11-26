@@ -193,3 +193,11 @@ describe('chave antiga trajeto-settings', () => {
     expect(savedJson()).toBe(saved);
   });
 });
+
+describe('navegação com a tela bloqueada', () => {
+  it('vem ligada, também para quem já tinha ajustes salvos antes da chave existir', async () => {
+    seedPlainToken();
+    const { useSettings } = await openApp();
+    expect(useSettings.getState().backgroundNav).toBe(true);
+  });
+});
