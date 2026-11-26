@@ -401,8 +401,10 @@ function followLocation(t: Trace) {
  */
 export async function resumeNavigation(): Promise<boolean> {
   if (useNavSession.getState().status !== 'idle') return false;
+  const gen = sessionGen;
   const saved = await loadActiveTrip(currentApiUrl());
-  if (!saved || useNavSession.getState().status !== 'idle') return false;
+  // Outra navegação começou (e talvez já acabou) durante a leitura: o registro lido é de uma viagem encerrada.
+  if (!saved || gen !== sessionGen || useNavSession.getState().status !== 'idle') return false;
   const chosen = saved.plan.routes[saved.routeIndex]!;
   cleanup();
   finishing = false;
