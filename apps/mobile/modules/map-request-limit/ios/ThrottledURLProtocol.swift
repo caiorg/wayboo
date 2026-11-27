@@ -28,6 +28,10 @@ final class ThrottledURLProtocol: URLProtocol {
   private let stateLock = NSLock()
   private var stopped = false
   private var innerTask: URLSessionDataTask?
+  /// Run loop e modos da thread que chamou `startLoading`. O `stopLoading` roda nela, então entregar ao cliente
+  /// nela serializa as notificações com o cancelamento.
+  private var clientRunLoop: CFRunLoop?
+  private var clientModes: [CFString] = [CFRunLoopMode.defaultMode.rawValue]
 
   override class func canInit(with request: URLRequest) -> Bool {
     guard let host = request.url?.host?.lowercased(), hosts.contains(host) else { return false }
@@ -39,6 +43,10 @@ final class ThrottledURLProtocol: URLProtocol {
   }
 
   override func startLoading() {
+    clientRunLoop = CFRunLoopGetCurrent()
+    if let mode = RunLoop.current.currentMode, mode != .default {
+      clientModes.append(mode.rawValue as CFString)
+    }
     Self.gate.enter(self) { [weak self] in
       guard let self else {
         Self.gate.leave()
@@ -66,7 +74,11 @@ final class ThrottledURLProtocol: URLProtocol {
     URLProtocol.setProperty(true, forKey: Self.handledKey, in: copy)
     let inner = Self.session.dataTask(with: copy as URLRequest) { [weak self] data, response, error in
       Self.gate.leave()
-      self?.deliver(data: data, response: response, error: error)
+      guard let self, let runLoop = self.clientRunLoop else { return }
+      CFRunLoopPerformBlock(runLoop, self.clientModes as CFArray) {
+        self.deliver(data: data, response: response, error: error)
+      }
+      CFRunLoopWakeUp(runLoop)
     }
     stateLock.lock()
     if stopped {
@@ -79,6 +91,7 @@ final class ThrottledURLProtocol: URLProtocol {
     inner.resume()
   }
 
+  /// Roda na thread do cliente, a mesma do `stopLoading`: depois do cancelamento, nada chega ao cliente.
   private func deliver(data: Data?, response: URLResponse?, error: Error?) {
     stateLock.lock()
     let wasStopped = stopped
