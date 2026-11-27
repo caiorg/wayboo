@@ -39,9 +39,9 @@ function isOurs(metadata: Record<string, unknown>): metadata is OfflineMeta & { 
   return metadata.app === 'wayboo' && typeof metadata.routeId === 'string' && typeof metadata.part === 'number' && typeof metadata.style === 'string';
 }
 
-/** O Android devolve `null` para um pacote que não existe mais. */
+/** `null`: o pacote não existe mais (Android e iOS). Uma consulta que falha rejeita, porque o pacote pode seguir ativo. */
 async function statusOf(pack: OfflinePack): Promise<OfflinePackStatus | null> {
-  return (await pack.status().catch(() => null)) ?? null;
+  return (await pack.status()) ?? null;
 }
 
 /** Como contar os bytes de um pacote dentro do download da parte. */
@@ -125,8 +125,10 @@ function follow(pack: OfflinePack, budget: Budget, onProgress: (status: OfflineP
         // Um evento que chegou antes de o listener ficar pronto já pode ter encerrado o download.
         if (settled) return;
         // Depois do listener: o pacote pode ter terminado antes (recursos já salvos por outro pacote).
-        void statusOf(pack).then(check);
-        timer = setInterval(() => void statusOf(pack).then(check), POLL_MS);
+        // Uma consulta que falha não encerra: o próximo evento ou a próxima consulta decide.
+        const poll = () => void statusOf(pack).then(check, () => {});
+        poll();
+        timer = setInterval(poll, POLL_MS);
       },
       (e: unknown) => void finish({ error: e instanceof Error ? e.message : String(e) }, true),
     );
@@ -218,7 +220,7 @@ export async function listOfflineAreas(): Promise<OfflineArea[]> {
   for (const p of await OfflineManager.getPacks()) {
     const meta = p.metadata;
     if (!isOurs(meta)) continue;
-    areas.push(statusOf(p).then((s) => (s ? { id: p.id, meta, bytes: s.completedResourceSize, complete: s.state === 'complete' } : null)));
+    areas.push(statusOf(p).catch(() => null).then((s) => (s ? { id: p.id, meta, bytes: s.completedResourceSize, complete: s.state === 'complete' } : null)));
   }
   return (await Promise.all(areas)).filter((a): a is OfflineArea => a !== null);
 }

@@ -255,6 +255,32 @@ describe('downloadArea', () => {
     await expect(next).resolves.toMatchObject({ status: 'complete' });
   });
 
+  it('consulta de status que falha durante o download não encerra nem solta o pacote', async () => {
+    const create = vi.mocked(OfflineManager.createPack).getMockImplementation()!;
+    vi.mocked(OfflineManager.createPack).mockImplementationOnce(async (...args) => {
+      const pack = (await create(...args)) as unknown as FakePack;
+      pack.status = () => Promise.reject(new Error('módulo nativo indisponível'));
+      return pack as never;
+    });
+    const done = downloadArea({ styles: ['https://s/light'], bounds, meta: meta() }, () => {});
+    await settle();
+    await settle();
+    expect(h.listeners.size).toBe(1);
+    await emit({ state: 'complete', percentage: 100, completedResourceSize: 1000 });
+    await expect(done).resolves.toEqual({ status: 'complete', bytes: 1000 });
+  });
+
+  it('consulta que falha no pacote já criado não cria outro igual', async () => {
+    const old = makePack({ ...meta(), style: 'https://s/light' }, bounds);
+    old.status = () => Promise.reject(new Error('módulo nativo indisponível'));
+    h.packs.push(old);
+    await expect(downloadArea({ styles: ['https://s/light'], bounds, meta: meta() }, () => {})).resolves.toEqual({
+      status: 'error',
+      message: 'módulo nativo indisponível',
+    });
+    expect(OfflineManager.createPack).not.toHaveBeenCalled();
+  });
+
   it('evento antes de o listener ficar pronto não deixa consulta periódica rodando', async () => {
     vi.useFakeTimers();
     try {
