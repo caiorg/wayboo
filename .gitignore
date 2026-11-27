@@ -4,6 +4,9 @@ dist/
 web-build/
 ios/
 android/
+# Código nativo dos módulos Expo locais é fonte, não saída do prebuild.
+!apps/mobile/modules/*/ios/
+!apps/mobile/modules/*/android/
 *.db
 *.db-wal
 *.db-shm

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ScrollView, StyleSheet, Switch, TextInput, View } from 'react-native';
+import { OfflineMapsCard } from '@/components/OfflineMapsCard';
 import { Button, Card, Chip, T } from '@/components/ui';
 import { BACKGROUND_LOCATION_SUPPORTED } from '@/lib/backgroundLocation';
 import { api, ApiError, LocalSaveError, RegistrationLimitError, type DeviceInfo } from '@/lib/api';
@@ -207,6 +208,8 @@ export default function SettingsScreen() {
         {row('Evitar pedágios', s.avoidTolls, (v) => s.set({ avoidTolls: v }), 'O app também aprende isso das suas escolhas.')}
         {row('Evitar rodovias', s.avoidHighways, (v) => s.set({ avoidHighways: v }))}
       </Card>
+
+      <OfflineMapsCard />
 
       <Card style={{ gap: 10 }}>
         <T variant="title">Privacidade</T>

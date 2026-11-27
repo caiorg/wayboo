@@ -1,0 +1,233 @@
+import { OfflineManager, type OfflinePack, type OfflinePackStatus } from '@maplibre/maplibre-react-native';
+import { countedBytes, judgeProgress, OFFLINE_MAX_ZOOM, OFFLINE_MIN_ZOOM, reusesTilesOf, STOP_AT_BYTES, type Bounds } from './offlineArea';
+
+/** Gravado em cada pacote: identifica os do Wayboo e a parte da rota a que pertencem. */
+// `type`, não `interface`: precisa caber no `Record<string, unknown>` do metadata do pacote.
+export type OfflineMeta = {
+  app: 'wayboo';
+  routeId: string;
+  part: number;
+  total: number;
+};
+
+export interface OfflineArea {
+  id: string;
+  meta: OfflineMeta & { style: string };
+  bytes: number;
+  complete: boolean;
+}
+
+export interface DownloadProgress {
+  percentage: number;
+  bytes: number;
+}
+
+export type DownloadResult = { status: 'complete' | 'partial'; bytes: number } | { status: 'error'; message: string };
+
+/** Na web o MapLibre GL não tem pacotes offline: ver `offlineMaps.web.ts`. */
+export const offlineSupported = true;
+
+/** Rede de segurança: um evento perdido não deixa o download pendurado. */
+const POLL_MS = 2000;
+/**
+ * Pacote que segue inativo sem nunca ter ficado ativo: um erro chegou antes do listener e o MapLibre não o repete.
+ * O `createPack` e o `resume` ativam o pacote na hora, então 10 s inativo é falha, não lentidão.
+ */
+const NEVER_STARTED_MS = 10_000;
+
+function isOurs(metadata: Record<string, unknown>): metadata is OfflineMeta & { style: string } {
+  return metadata.app === 'wayboo' && typeof metadata.routeId === 'string' && typeof metadata.part === 'number' && typeof metadata.style === 'string';
+}
+
+/** `null`: o pacote não existe mais (Android e iOS). Uma consulta que falha rejeita, porque o pacote pode seguir ativo. */
+async function statusOf(pack: OfflinePack): Promise<OfflinePackStatus | null> {
+  return (await pack.status()) ?? null;
+}
+
+/** Como contar os bytes de um pacote dentro do download da parte. */
+type Budget = { reusesTiles: boolean; alreadyBytes: number };
+
+type Followed = { verdict: 'complete' | 'limit'; bytes: number } | { error: string };
+
+/**
+ * Pacote que não conseguimos pausar nem apagar e pode seguir baixando. Enquanto ele estiver ativo, nenhum download
+ * novo começa: seriam dois em paralelo, acima das 4 requisições dos termos.
+ */
+let runaway: OfflinePack | null = null;
+
+/**
+ * Para o pacote. Se a pausa falhar, apaga: um pacote solto continuaria baixando além do limite e em paralelo
+ * com o próximo download.
+ */
+async function halt(pack: OfflinePack): Promise<'paused' | 'deleted' | 'failed'> {
+  try {
+    await pack.pause();
+    return 'paused';
+  } catch {
+    try {
+      await OfflineManager.deletePack(pack.id);
+      return 'deleted';
+    } catch {
+      runaway = pack;
+      return 'failed';
+    }
+  }
+}
+
+/** Espera o pacote terminar, bater num limite dos termos, falhar ou ser parado por fora. Pausa nos três últimos. */
+function follow(pack: OfflinePack, budget: Budget, onProgress: (status: OfflinePackStatus) => void): Promise<Followed> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let sawActive = false;
+    let inactiveSince: number | null = null;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const finish = async (result: Followed, stop: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(timer);
+      OfflineManager.removeListener(pack.id);
+      const stopped = stop ? await halt(pack) : 'paused';
+      if (stopped === 'failed') resolve({ error: 'Não foi possível parar o download desta parte.' });
+      else if (stopped === 'deleted' && !('error' in result)) resolve({ error: 'Não foi possível pausar o download; a parte foi descartada.' });
+      else resolve(result);
+    };
+    const check = (status: OfflinePackStatus | null) => {
+      if (settled) return;
+      if (!status) {
+        void finish({ error: 'O mapa salvo foi apagado durante o download.' }, false);
+        return;
+      }
+      onProgress(status);
+      if (status.state === 'active') sawActive = true;
+      // Ativo e depois inativo: alguém pausou ou apagou o pacote fora deste download.
+      if (status.state === 'inactive' && sawActive) {
+        void finish({ error: 'Download interrompido.' }, false);
+        return;
+      }
+      if (status.state === 'inactive') {
+        inactiveSince ??= Date.now();
+        if (Date.now() - inactiveSince >= NEVER_STARTED_MS) {
+          void finish({ error: 'O download não começou.' }, true);
+          return;
+        }
+      } else {
+        inactiveSince = null;
+      }
+      const verdict = judgeProgress(status, budget);
+      if (verdict !== 'downloading') void finish({ verdict, bytes: countedBytes(status, budget.reusesTiles) }, verdict === 'limit');
+    };
+    OfflineManager.addListener(
+      pack.id,
+      (_pack, status) => check(status),
+      (_pack, error) => void finish({ error: error.message }, true),
+    ).then(
+      () => {
+        // Um evento que chegou antes de o listener ficar pronto já pode ter encerrado o download.
+        if (settled) return;
+        // Depois do listener: o pacote pode ter terminado antes (recursos já salvos por outro pacote).
+        // Uma consulta que falha não encerra: o próximo evento ou a próxima consulta decide.
+        const poll = () => void statusOf(pack).then(check, () => {});
+        poll();
+        timer = setInterval(poll, POLL_MS);
+      },
+      (e: unknown) => void finish({ error: e instanceof Error ? e.message : String(e) }, true),
+    );
+  });
+}
+
+/** Style JSON de uma URL, ou `null` se a consulta falhar. */
+async function fetchStyle(url: string): Promise<unknown> {
+  try {
+    const res = await fetch(url);
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+type Opened = { pack: OfflinePack } | { done: Followed };
+
+async function openPack(style: string, bounds: Bounds, meta: OfflineMeta, budget: Budget): Promise<Opened> {
+  const existing = (await OfflineManager.getPacks()).find(
+    (p) => isOurs(p.metadata) && p.metadata.routeId === meta.routeId && p.metadata.part === meta.part && p.metadata.style === style,
+  );
+  if (existing) {
+    const status = await statusOf(existing);
+    if (status) {
+      // Completo ou já no limite: retomar só baixaria mais além dos 50 MB.
+      const verdict = judgeProgress(status, budget);
+      if (verdict !== 'downloading') return { done: { verdict, bytes: countedBytes(status, budget.reusesTiles) } };
+      // Tentativa anterior parou no meio (erro ou app fechado): retoma em vez de criar outro pacote igual.
+      await existing.resume();
+      return { pack: existing };
+    }
+  }
+  const pack = await OfflineManager.createPack(
+    { mapStyle: style, bounds, minZoom: OFFLINE_MIN_ZOOM, maxZoom: OFFLINE_MAX_ZOOM, metadata: { ...meta, style } },
+    () => {},
+    () => {},
+  );
+  return { pack };
+}
+
+/**
+ * Baixa `bounds` para cada estilo, um depois do outro, como um único download iniciado pelo usuário. No OpenFreeMap os
+ * dois estilos usam as mesmas fontes de tiles e o MapLibre reaproveita o que já está no banco, então o segundo estilo
+ * só traz estilo, sprites e fontes. Sem ele, o mapa sumiria ao trocar para o tema escuro sem rede.
+ */
+export async function downloadArea(
+  { styles, bounds, meta }: { styles: string[]; bounds: Bounds; meta: OfflineMeta },
+  onProgress: (p: DownloadProgress) => void,
+): Promise<DownloadResult> {
+  if (runaway) {
+    // Libera só com confirmação: status `null` (pacote apagado) ou fora de `active`. Consulta que falha mantém o bloqueio.
+    const s = await runaway.status().then(
+      (status) => status ?? null,
+      () => 'unknown' as const,
+    );
+    if (s === 'unknown' || s?.state === 'active') {
+      return { status: 'error', message: 'O download anterior ainda não parou. Tente de novo daqui a pouco.' };
+    }
+    runaway = null;
+  }
+  // Na falha da consulta, conta os tiles inteiros: contar a mais só para o download antes, contar a menos passa dos 50 MB.
+  const styleJsons = styles.length > 1 ? await Promise.all(styles.map(fetchStyle)) : [];
+  let bytes = 0;
+  for (const [i, style] of styles.entries()) {
+    // O estilo anterior já gastou a cota da parte: o próximo não começa.
+    if (bytes >= STOP_AT_BYTES) return { status: 'partial', bytes };
+    const budget: Budget = { reusesTiles: i > 0 && reusesTilesOf(styleJsons[0], styleJsons[i]), alreadyBytes: bytes };
+    try {
+      const opened = await openPack(style, bounds, meta, budget);
+      const result =
+        'done' in opened
+          ? opened.done
+          : await follow(opened.pack, budget, (s) =>
+              onProgress({ percentage: ((i + s.percentage / 100) / styles.length) * 100, bytes: bytes + countedBytes(s, budget.reusesTiles) }),
+            );
+      if ('error' in result) return { status: 'error', message: result.error };
+      bytes += result.bytes;
+      if (result.verdict === 'limit') return { status: 'partial', bytes };
+    } catch (e) {
+      return { status: 'error', message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+  return { status: 'complete', bytes };
+}
+
+export async function listOfflineAreas(): Promise<OfflineArea[]> {
+  const areas: Promise<OfflineArea | null>[] = [];
+  for (const p of await OfflineManager.getPacks()) {
+    const meta = p.metadata;
+    if (!isOurs(meta)) continue;
+    areas.push(statusOf(p).catch(() => null).then((s) => (s ? { id: p.id, meta, bytes: s.completedResourceSize, complete: s.state === 'complete' } : null)));
+  }
+  return (await Promise.all(areas)).filter((a): a is OfflineArea => a !== null);
+}
+
+/** Apaga os pacotes do Wayboo. Devolve quantos apagou. */
+export async function deleteOfflineAreas(): Promise<number> {
+  const ours = (await OfflineManager.getPacks()).filter((p) => isOurs(p.metadata));
+  for (const p of ours) await OfflineManager.deletePack(p.id);
+  return ours.length;
+}
