@@ -323,6 +323,19 @@ describe('voz da navegação', () => {
     expect(mocks.updateOpts.at(-1)).toEqual({ speaking: false });
   });
 
+  it('mudo durante a fala libera a voz para o navegador', async () => {
+    useSettings.setState({ voice: true });
+    useLocationStore.setState({ fix });
+    mocks.announcement = 'Vire à direita';
+    await startNavigation(plan, 0, false);
+    await settle();
+    mocks.announcement = null;
+    toggleMute();
+    toggleMute();
+    useLocationStore.setState({ fix: { ...fix, t: 2 } });
+    expect(mocks.updateOpts.at(-1)).toEqual({ speaking: false });
+  });
+
   it('sem voz no idioma, fala só com o idioma', async () => {
     useSettings.setState({ voice: true });
     useLocationStore.setState({ fix });

@@ -476,6 +476,7 @@ export function toggleMute() {
   const muted = !useNavSession.getState().muted;
   if (muted) {
     speechGen++;
+    speakingSince = null;
     Speech.stop();
   }
   useNavSession.setState({ muted });
