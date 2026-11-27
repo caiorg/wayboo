@@ -2,13 +2,33 @@ import type { PlanResponse } from '@wayboo/core';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as Speech from 'expo-speech';
-import { pickVoice, startNavigation, stopNavigation, toggleMute, useNavSession, type VoiceInfo } from '../src/lib/navigation';
+import { saveActiveTrip } from '../src/lib/activeTrip';
+import { pickVoice, resumeNavigation, startNavigation, stopNavigation, toggleMute, useNavSession, type VoiceInfo } from '../src/lib/navigation';
 import { useLocationStore } from '../src/lib/location';
 import { startBackgroundLocation, stopBackgroundLocation } from '../src/lib/backgroundLocation';
-import { api } from '../src/lib/api';
+import { api, ApiError } from '../src/lib/api';
 import { useSettings } from '../src/lib/store';
 
-const mocks = vi.hoisted(() => ({ announcement: null as string | null, bgSupported: true }));
+const mocks = vi.hoisted(() => ({
+  announcement: null as string | null,
+  bgSupported: true,
+  offRoute: false,
+  visit: false,
+  async: new Map<string, string>(),
+  readGate: null as Promise<void> | null,
+  navigators: [] as { route: unknown; updates: number }[],
+}));
+
+vi.mock('@react-native-async-storage/async-storage', () => ({
+  default: {
+    getItem: async (k: string) => {
+      if (mocks.readGate) await mocks.readGate;
+      return mocks.async.get(k) ?? null;
+    },
+    setItem: async (k: string, v: string) => void mocks.async.set(k, v),
+    removeItem: async (k: string) => void mocks.async.delete(k),
+  },
+}));
 
 // Imita o expo-keep-awake da web: desativar uma tag inativa lança erro.
 const active = new Set<string>();
@@ -28,16 +48,35 @@ vi.mock('expo-speech', () => ({
 }));
 vi.mock('@wayboo/core', () => ({
   INSTRUCTION_LANGUAGE: 'pt-BR',
-  createNavigator: () => ({ update: () => ({ arrived: false, offRoute: false, announcement: mocks.announcement }) }),
+  createNavigator: (route: unknown) => {
+    const nav = { route, updates: 0 };
+    mocks.navigators.push(nav);
+    return {
+      update: () => {
+        nav.updates++;
+        return { arrived: false, offRoute: mocks.offRoute, announcement: mocks.announcement };
+      },
+    };
+  },
   simulateDrive: function* () {},
-  markVisitedStops: (stops: unknown) => stops,
+  markVisitedStops: (stops: unknown[]) => (mocks.visit ? [...stops] : stops),
   rerouteRequest: () => ({}),
 }));
 vi.mock('../src/lib/api', () => ({
+  ApiError: class extends Error {
+    constructor(
+      public status: number,
+      message: string,
+    ) {
+      super(message);
+    }
+  },
   api: {
     startTrip: vi.fn(async () => ({ tripId: 't1' })),
     finishTrip: vi.fn(async () => ({})),
     samples: vi.fn(async () => {}),
+    plan: vi.fn(),
+    reroute: vi.fn(async () => {}),
   },
 }));
 vi.mock('../src/lib/location', async () => {
@@ -46,7 +85,10 @@ vi.mock('../src/lib/location', async () => {
 });
 vi.mock('../src/lib/store', async () => {
   const { create } = await import('zustand');
-  return { useSettings: create(() => ({ voice: false, avoidTolls: false, avoidHighways: false, backgroundNav: true })) };
+  return {
+    normalizeApiUrl: (u: string) => u,
+    useSettings: create(() => ({ voice: false, avoidTolls: false, avoidHighways: false, backgroundNav: true, apiUrl: 'https://api.wayboo.app' })),
+  };
 });
 vi.mock('../src/lib/backgroundLocation', () => ({
   get BACKGROUND_LOCATION_SUPPORTED() {
@@ -60,8 +102,14 @@ const plan = {
   planId: 'p1',
   destinationName: 'Av. Paulista, 1000',
   waypoints: [],
-  routes: [{ route: {}, eta: { segmentDurationsS: [] } }],
+  routes: [{ route: { id: 'r0' }, eta: { segmentDurationsS: [] }, alerts: [] }],
 } as unknown as PlanResponse;
+
+const TRIP_KEY = 'wayboo-active-trip';
+const stored = () => {
+  const raw = mocks.async.get(TRIP_KEY);
+  return raw ? (JSON.parse(raw) as { tripId: string | null; routeIndex: number }) : null;
+};
 
 const activate = vi.mocked(activateKeepAwakeAsync);
 const deactivate = vi.mocked(deactivateKeepAwake);
@@ -72,8 +120,13 @@ beforeEach(() => {
   active.clear();
   mocks.announcement = null;
   mocks.bgSupported = true;
+  mocks.offRoute = false;
+  mocks.visit = false;
+  mocks.navigators = [];
+  mocks.readGate = null;
+  mocks.async.clear();
   useSettings.setState({ voice: false, backgroundNav: true });
-  useNavSession.setState({ muted: false });
+  useNavSession.setState({ muted: false, status: 'idle', error: null });
   useLocationStore.setState({ fix: null });
 });
 
@@ -471,8 +524,8 @@ describe('resposta atrasada de startTrip', () => {
     await startingA;
     expect(useNavSession.getState().tripId).toBe('B');
     await stopNavigation();
-    expect(api.finishTrip).toHaveBeenCalledTimes(1);
-    expect(api.finishTrip).toHaveBeenCalledWith('B');
+    // A órfã A é encerrada assim que a resposta chega: sem amostras, o servidor a descarta.
+    expect(vi.mocked(api.finishTrip).mock.calls.map((c) => c[0])).toEqual(['A', 'B']);
   });
 
   it('a falha de uma viagem já encerrada não mostra erro', async () => {
@@ -495,5 +548,237 @@ describe('navegação com a tela bloqueada sem suporte (web)', () => {
     await settle();
     expect(startBackgroundLocation).not.toHaveBeenCalled();
     expect(useNavSession.getState().error).toBeNull();
+  });
+});
+
+describe('navegação sem rede', () => {
+  const fix = { t: 1, lat: -23.5, lon: -46.6 };
+  const sample = { t: 1, lat: -23.5, lon: -46.6, speed: null, heading: null, accuracy: 5 };
+
+  it('grava a viagem ativa com o id do servidor', async () => {
+    await startNavigation(plan, 0, false);
+    await settle();
+    expect(stored()).toMatchObject({ tripId: 't1', routeIndex: 0 });
+  });
+
+  it('não grava a simulação', async () => {
+    await startNavigation(plan, 0, true);
+    await settle();
+    expect(stored()).toBeNull();
+  });
+
+  it('encerrar apaga a viagem gravada', async () => {
+    await startNavigation(plan, 0, false);
+    await stopNavigation();
+    await settle();
+    expect(stored()).toBeNull();
+  });
+
+  it('retoma a viagem depois de reabrir o app e envia o rastro guardado', async () => {
+    await saveActiveTrip({
+      savedAt: Date.now(),
+      apiUrl: 'https://api.wayboo.app',
+      plan,
+      routeIndex: 0,
+      stops: [],
+      tripId: 't9',
+      buffer: [sample],
+    });
+    expect(await resumeNavigation()).toBe(true);
+    const s = useNavSession.getState();
+    expect(s).toMatchObject({ status: 'navigating', tripId: 't9', simulated: false });
+    expect(s.route).toEqual(plan.routes[0]!.route);
+    expect(api.startTrip).not.toHaveBeenCalled();
+    await stopNavigation();
+    expect(api.samples).toHaveBeenCalledWith('t9', [sample]);
+    expect(api.finishTrip).toHaveBeenCalledWith('t9');
+  });
+
+  it('sem viagem gravada não retoma', async () => {
+    expect(await resumeNavigation()).toBe(false);
+    expect(useNavSession.getState().status).toBe('idle');
+  });
+
+  it('não retoma por cima de uma navegação em curso', async () => {
+    await startNavigation(plan, 0, true);
+    await saveActiveTrip({ savedAt: Date.now(), apiUrl: 'https://api.wayboo.app', plan, routeIndex: 0, stops: [], tripId: 't9', buffer: [] });
+    expect(await resumeNavigation()).toBe(false);
+    expect(useNavSession.getState().simulated).toBe(true);
+  });
+
+  it('sem rede ao recalcular, segue a rota anterior e avisa', async () => {
+    vi.mocked(api.plan).mockRejectedValueOnce(new ApiError(0, 'Sem conexão com o servidor (x). Confira a URL em Ajustes.'));
+    mocks.offRoute = true;
+    useLocationStore.setState({ fix });
+    await startNavigation(plan, 0, false);
+    await settle();
+    const s = useNavSession.getState();
+    expect(s.route).toBe(plan.routes[0]!.route);
+    expect(s.rerouting).toBe(false);
+    expect(s.error).toBe('Sem conexão: seguindo a rota anterior.');
+  });
+
+  it('recálculo com sucesso limpa o aviso e grava a rota nova', async () => {
+    const next = { ...plan, planId: 'p2', recommendedIndex: 0, routes: [{ route: { id: 'r2' }, eta: { segmentDurationsS: [] } }] };
+    let resolve!: (r: PlanResponse) => void;
+    vi.mocked(api.plan).mockReturnValueOnce(new Promise((r) => (resolve = r)));
+    mocks.offRoute = true;
+    useLocationStore.setState({ fix });
+    await startNavigation(plan, 0, false);
+    useNavSession.setState({ error: 'Sem conexão: seguindo a rota anterior.' });
+    resolve(next as unknown as PlanResponse);
+    await settle();
+    await settle();
+    const s = useNavSession.getState();
+    expect(s.route).toEqual({ id: 'r2' });
+    expect(s.error).toBeNull();
+    expect(JSON.parse(mocks.async.get(TRIP_KEY)!).plan.planId).toBe('p2');
+  });
+
+  it('o lote em envio fica na gravação até o servidor confirmar', async () => {
+    vi.useFakeTimers();
+    try {
+      let confirm!: () => void;
+      vi.mocked(api.samples).mockReturnValueOnce(new Promise((r) => (confirm = () => r({ stored: 1 }))));
+      useLocationStore.setState({ fix: { t: 1, lat: -23.5, lon: -46.6 } });
+      await startNavigation(plan, 0, false);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(api.samples).toHaveBeenCalledTimes(1);
+      // Uma parada visitada grava a viagem enquanto o envio espera resposta.
+      mocks.visit = true;
+      useLocationStore.setState({ fix: { t: 2, lat: -23.5, lon: -46.6 } });
+      await vi.advanceTimersByTimeAsync(0);
+      const pending = JSON.parse(mocks.async.get(TRIP_KEY)!) as { buffer: { t: number }[] };
+      expect(pending.buffer.map((x) => x.t)).toEqual([1, 2]);
+      confirm();
+      mocks.visit = false;
+      await vi.advanceTimersByTimeAsync(15_000);
+      const after = JSON.parse(mocks.async.get(TRIP_KEY)!) as { buffer: { t: number }[] };
+      expect(after.buffer.map((x) => x.t)).not.toContain(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('recálculo que o servidor não registra mantém o navegador da rota anterior', async () => {
+    const next = { ...plan, planId: 'p2', recommendedIndex: 0, routes: [{ route: { id: 'r2' }, eta: { segmentDurationsS: [] }, alerts: [] }] };
+    vi.mocked(api.plan).mockResolvedValueOnce(next as unknown as PlanResponse);
+    vi.mocked(api.reroute).mockRejectedValueOnce(new ApiError(0, 'Sem conexão'));
+    mocks.offRoute = true;
+    useLocationStore.setState({ fix: { t: 1, lat: -23.5, lon: -46.6 } });
+    await startNavigation(plan, 0, false);
+    await settle();
+    expect(useNavSession.getState().route).toEqual({ id: 'r0' });
+    mocks.offRoute = false;
+    useLocationStore.setState({ fix: { t: 2, lat: -23.5, lon: -46.6 } });
+    const old = mocks.navigators.find((n) => (n.route as { id: string }).id === 'r0')!;
+    const fresh = mocks.navigators.find((n) => (n.route as { id: string }).id === 'r2');
+    expect(old.updates).toBe(2);
+    expect(fresh?.updates ?? 0).toBe(0);
+  });
+
+  it('um envio do rastro espera o anterior e nenhum lote sai da gravação antes da confirmação', async () => {
+    vi.useFakeTimers();
+    try {
+      const confirms: (() => void)[] = [];
+      vi.mocked(api.samples).mockImplementation(() => new Promise((r) => confirms.push(() => r({ stored: 1 }))));
+      useLocationStore.setState({ fix: { t: 1, lat: -23.5, lon: -46.6 } });
+      await startNavigation(plan, 0, false);
+      await vi.advanceTimersByTimeAsync(15_000);
+      useLocationStore.setState({ fix: { t: 2, lat: -23.5, lon: -46.6 } });
+      // O primeiro envio ainda espera: o segundo tique não começa outro.
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(api.samples).toHaveBeenCalledTimes(1);
+      mocks.visit = true;
+      useLocationStore.setState({ fix: { t: 3, lat: -23.5, lon: -46.6 } });
+      await vi.advanceTimersByTimeAsync(0);
+      const saved = JSON.parse(mocks.async.get(TRIP_KEY)!) as { buffer: { t: number }[] };
+      expect(saved.buffer.map((x) => x.t)).toEqual([1, 2, 3]);
+      confirms[0]!();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(api.samples).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(api.samples).mock.calls[1]![1].map((x) => x.t)).toEqual([2, 3]);
+      confirms[1]!();
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.mocked(api.samples).mockReset();
+      vi.mocked(api.samples).mockImplementation(async () => ({ stored: 0 }));
+      vi.useRealTimers();
+    }
+  });
+
+  it('recálculo de uma navegação encerrada não mexe na navegação nova', async () => {
+    let answer!: (r: PlanResponse) => void;
+    vi.mocked(api.plan).mockReturnValueOnce(new Promise((r) => (answer = r)));
+    mocks.offRoute = true;
+    useLocationStore.setState({ fix: { t: 1, lat: -23.5, lon: -46.6 } });
+    await startNavigation(plan, 0, false);
+    expect(api.plan).toHaveBeenCalledTimes(1);
+    await stopNavigation();
+    mocks.offRoute = false;
+    const other = { ...plan, planId: 'p3', routes: [{ route: { id: 'r3' }, eta: { segmentDurationsS: [] }, alerts: [] }] } as unknown as PlanResponse;
+    await startNavigation(other, 0, false);
+    answer({ ...plan, planId: 'p2', recommendedIndex: 0, routes: [{ route: { id: 'r2' }, eta: { segmentDurationsS: [] }, alerts: [] }] } as unknown as PlanResponse);
+    await settle();
+    expect(useNavSession.getState()).toMatchObject({ route: { id: 'r3' }, rerouting: false, error: null });
+    expect(api.reroute).not.toHaveBeenCalled();
+    expect(JSON.parse(mocks.async.get(TRIP_KEY)!).plan.planId).toBe('p3');
+  });
+
+  it('grava o lote antes de enviar, sem depender de outra gravação no meio', async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    try {
+      vi.mocked(api.samples).mockReturnValueOnce(new Promise((r) => (release = () => r({ stored: 1 }))));
+      useLocationStore.setState({ fix: { t: 1, lat: -23.5, lon: -46.6 } });
+      await startNavigation(plan, 0, false);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(api.samples).toHaveBeenCalledTimes(1);
+      const saved = JSON.parse(mocks.async.get(TRIP_KEY)!) as { buffer: { t: number }[] };
+      expect(saved.buffer.map((x) => x.t)).toEqual([1]);
+    } finally {
+      release?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it('viagem criada por uma navegação já encerrada não entra na navegação nova', async () => {
+    let first!: (r: { tripId: string }) => void;
+    vi.mocked(api.startTrip).mockReturnValueOnce(new Promise((r) => (first = r)));
+    vi.mocked(api.startTrip).mockResolvedValueOnce({ tripId: 't2' });
+    const starting = startNavigation(plan, 0, false);
+    await stopNavigation();
+    await startNavigation(plan, 0, false);
+    first({ tripId: 't-old' });
+    await starting;
+    await settle();
+    expect(useNavSession.getState().tripId).toBe('t2');
+    expect(JSON.parse(mocks.async.get(TRIP_KEY)!).tripId).toBe('t2');
+    // A viagem órfã é encerrada: sem amostras, o servidor a descarta.
+    expect(api.finishTrip).toHaveBeenCalledWith('t-old');
+  });
+
+  it('falha de startTrip de uma navegação encerrada não aparece na nova', async () => {
+    let fail!: (e: Error) => void;
+    vi.mocked(api.startTrip).mockReturnValueOnce(new Promise((_, r) => (fail = r)));
+    const starting = startNavigation(plan, 0, false);
+    await stopNavigation();
+    await startNavigation(plan, 0, false);
+    fail(new Error('Viagem não registrada'));
+    await starting;
+    expect(useNavSession.getState()).toMatchObject({ tripId: 't1', error: null });
+  });
+
+  it('retomada que termina de ler depois de outra navegação começar e acabar é descartada', async () => {
+    await saveActiveTrip({ savedAt: Date.now(), apiUrl: 'https://api.wayboo.app', plan, routeIndex: 0, stops: [], tripId: 't9', buffer: [] });
+    let open!: () => void;
+    mocks.readGate = new Promise((r) => (open = r));
+    const resuming = resumeNavigation();
+    await startNavigation(plan, 0, true);
+    await stopNavigation();
+    expect(useNavSession.getState().status).toBe('idle');
+    open();
+    expect(await resuming).toBe(false);
+    expect(useNavSession.getState()).toMatchObject({ status: 'idle', tripId: null });
   });
 });

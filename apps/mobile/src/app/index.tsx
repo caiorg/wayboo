@@ -13,7 +13,7 @@ import { Card, IconButton, T } from '@/components/ui';
 import { api, RegistrationLimitError, type GeocodeResult } from '@/lib/api';
 import { checkReportAccuracy } from '@/lib/gpsAccuracy';
 import { startLocation, useLocationStore } from '@/lib/location';
-import { dismissSession, startNavigation, stopNavigation, toggleMute, useNavSession } from '@/lib/navigation';
+import { dismissSession, resumeNavigation, startNavigation, stopNavigation, toggleMute, useNavSession } from '@/lib/navigation';
 import { useSettings } from '@/lib/store';
 import { ALERT_LABELS, useTheme } from '@/lib/theme';
 
@@ -74,6 +74,8 @@ export default function MapScreen() {
 
   useEffect(() => {
     void startLocation();
+    // O sistema pode ter fechado o app no meio de uma viagem: volta para a rota gravada, mesmo sem rede.
+    void resumeNavigation();
   }, []);
 
   const centered = useRef(false);
