@@ -12,6 +12,7 @@ import type {
   TraceSample,
 } from '@wayboo/core';
 import { getRandomBytes } from 'expo-crypto';
+import { readAiKey } from './aiKey';
 import { normalizeApiUrl, settingsHydration, settingsSaved, timeZone, useSettings } from './store';
 
 export interface GeocodeResult {
@@ -53,13 +54,24 @@ function retryAt(header: string | null): number {
   return Number.isNaN(date) ? now + DEFAULT_RETRY_AFTER_MS : Math.max(now, date);
 }
 
+/** Problema com a chave de IA própria: ausente do aparelho, servidor sem HTTPS ou recusada pelo provedor (422). */
+export class AiKeyError extends ApiError {}
+
 /** O servidor já apagou os dados, mas o aparelho não salvou a identidade nova. Não repetir o `DELETE /me`. */
 export class LocalSaveError extends Error {}
 
 type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
 /** `baseUrl` vem de quem chama: o token só vai para o servidor em que foi registrado. */
-async function send<T>(baseUrl: string, method: Method, path: string, body: unknown, timeoutMs: number, token: string | null): Promise<T> {
+async function send<T>(
+  baseUrl: string,
+  method: Method,
+  path: string,
+  body: unknown,
+  timeoutMs: number,
+  token: string | null,
+  extra: Record<string, string> = {},
+): Promise<T> {
   // AbortSignal.timeout não existe em todas as versões do Hermes.
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -72,6 +84,7 @@ async function send<T>(baseUrl: string, method: Method, path: string, body: unkn
         ...(token ? { authorization: `Bearer ${token}` } : {}),
         'x-time-zone': timeZone(),
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        ...extra,
       },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: ctrl.signal,
@@ -185,24 +198,57 @@ async function deviceToken(baseUrl: string): Promise<string> {
   return entry.token;
 }
 
-async function request<T>(method: Method, path: string, body?: unknown, timeoutMs = 25000): Promise<T> {
+/** HTTP só em loopback (proxy local, `10.0.2.2` do emulador Android): fora disso, a chave atravessaria a rede aberta. */
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '10.0.2.2']);
+
+function secureUrl(baseUrl: string): boolean {
+  try {
+    const u = new URL(baseUrl);
+    return u.protocol === 'https:' || (u.protocol === 'http:' && LOOPBACK.has(u.hostname));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Cabeçalhos da chave de IA própria. Sem escolha em Ajustes, nenhum: o servidor usa o provedor dele. Com escolha e sem
+ * chave no aparelho, erro em vez de cair calado na IA do servidor.
+ */
+async function aiHeaders(baseUrl: string): Promise<Record<string, string>> {
+  const ai = useSettings.getState().ai;
+  if (!ai) return {};
+  if (!secureUrl(baseUrl))
+    throw new AiKeyError(0, 'A chave de IA própria só é enviada por HTTPS. Use um servidor https:// ou volte para a IA do servidor em Ajustes.');
+  const key = await readAiKey().catch(() => null);
+  if (!key) throw new AiKeyError(0, 'A chave de IA própria não está neste aparelho. Cadastre de novo em Ajustes ou volte para a IA do servidor.');
+  return { 'x-ai-provider': ai.provider, 'x-ai-model': ai.model, 'x-ai-key': key };
+}
+
+/** `ai`: rota de IA, que leva a chave própria quando há uma; o 422 dela é erro da chave, do crédito ou do modelo. */
+async function request<T>(method: Method, path: string, body?: unknown, timeoutMs = 25000, ai = false): Promise<T> {
   const baseUrl = currentUrl();
   await hydrated();
   // Antes da hidratação, o `userId` em memória é o padrão; por isso a leitura vem depois dela.
   const localId = useSettings.getState().userId;
+  // Antes do registro do aparelho: sem HTTPS ou sem chave, a chamada falha sem sair do aparelho.
+  const extra = ai ? await aiHeaders(baseUrl) : {};
   const token = await deviceToken(baseUrl);
   if (useSettings.getState().userId !== localId) throw identityReset();
+  // O 422 de uma rota de IA é erro da chave, inclusive na repetição depois do 401.
+  const keyError = (e: unknown) => (ai && e instanceof ApiError && e.status === 422 ? new AiKeyError(422, e.message) : e);
   try {
-    return await send<T>(baseUrl, method, path, body, timeoutMs, token);
+    return await send<T>(baseUrl, method, path, body, timeoutMs, token, extra);
   } catch (e) {
     // Token recusado (banco do servidor recriado, por exemplo): registra o mesmo token de novo, uma vez.
-    if (!(e instanceof ApiError) || e.status !== 401) throw e;
+    if (!(e instanceof ApiError) || e.status !== 401) throw keyError(e);
     if (useSettings.getState().credentials[baseUrl]?.token === token) useSettings.getState().setCredential(baseUrl, { token });
     const retryToken = await deviceToken(baseUrl);
     // Depois de apagar os dados, a operação da identidade antiga não vai para a nova. Testa depois
     // de obter o token: o reset pode acontecer enquanto `deviceToken` espera.
     if (useSettings.getState().userId !== localId) throw identityReset();
-    return send<T>(baseUrl, method, path, body, timeoutMs, retryToken);
+    return await send<T>(baseUrl, method, path, body, timeoutMs, retryToken, extra).catch((e2: unknown) => {
+      throw keyError(e2);
+    });
   }
 }
 
@@ -226,6 +272,8 @@ export interface DeviceInfo {
 export interface Health {
   ok: boolean;
   ai: { provider: string; model: string } | null;
+  /** Provedores aceitos com a chave do usuário; ausente em servidores anteriores ao BYOK. */
+  byok?: string[];
   /** Ausente em servidores anteriores ao self-host; `null` quando o servidor não serve mapa. */
   map?: { light: string; dark: string } | null;
 }
@@ -246,9 +294,9 @@ export const api = {
     ),
   reverse: (p: LatLon) => request<{ result: GeocodeResult | null }>('GET', `/reverse?lat=${p.lat}&lon=${p.lon}`),
   plan: (req: Omit<PlanRequest, 'timeZone'>) => request<PlanResponse>('POST', '/plan', { ...req, timeZone: timeZone() }),
-  brief: (planId: string) => request<Brief>('POST', `/plan/${planId}/brief`, {}, 30000),
+  brief: (planId: string) => request<Brief>('POST', `/plan/${planId}/brief`, {}, 30000, true),
   assistant: (text: string, origin: LatLon) =>
-    request<AssistantResponse>('POST', '/assistant', { text, origin, timeZone: timeZone() }, 45000),
+    request<AssistantResponse>('POST', '/assistant', { text, origin, timeZone: timeZone() }, 45000, true),
   suggestions: (p: LatLon) => request<{ suggestions: Suggestion[] }>('GET', `/suggestions?lat=${p.lat}&lon=${p.lon}`, undefined, 30000),
   startTrip: (planId: string, routeIndex: number) =>
     request<{ tripId: string }>('POST', '/trips', { planId, routeIndex, timeZone: timeZone() }),
@@ -270,7 +318,7 @@ export const api = {
     return a as RoadAlert;
   },
   insights: () => request<Insights>('GET', '/insights'),
-  narrative: () => request<{ text: string | null; provider: string }>('POST', '/insights/narrative', {}, 40000),
+  narrative: () => request<{ text: string | null; provider: string }>('POST', '/insights/narrative', {}, 40000, true),
   privacy: () => request<Privacy>('GET', '/privacy'),
   setPrivacy: (p: Privacy) => request<Privacy>('PUT', '/privacy', p),
   /** Todas as linhas deste usuário no servidor, menos o hash do token (docs/privacidade.md). */

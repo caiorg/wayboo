@@ -5,6 +5,7 @@ import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet, View } from 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Button, Card, Chip, Icon, T } from '@/components/ui';
 import { api } from '@/lib/api';
+import { useSettings } from '@/lib/store';
 import { useTheme } from '@/lib/theme';
 
 export default function InsightsScreen() {
@@ -38,7 +39,11 @@ export default function InsightsScreen() {
     setNarrating(true);
     try {
       const r = await api.narrative();
-      setNarrative(r.text ?? 'Configure um provedor de IA na API (AI_PROVIDER) para gerar o resumo.');
+      // Com chave própria, `text` nulo é falha passageira do provedor, não falta de configuração.
+      const fallback = useSettings.getState().ai
+        ? 'Não foi possível gerar o resumo com a sua chave de IA agora. Tente de novo em instantes.'
+        : 'Configure um provedor de IA na API (AI_PROVIDER) ou a sua chave em Ajustes para gerar o resumo.';
+      setNarrative(r.text ?? fallback);
     } catch (e) {
       setNarrative(e instanceof Error ? e.message : 'Falha');
     } finally {
