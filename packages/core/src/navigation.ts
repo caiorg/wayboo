@@ -31,8 +31,6 @@ export interface NavState {
   currentStreet: string | null;
   /** Texto a falar agora, se houver */
   announcement: string | null;
-  /** O anúncio é o aviso de velocidade: entra na fila da voz em vez de cortar a fala em curso. */
-  announcementQueued: boolean;
   progress: number;
   /** Razão entre ritmo real e previsto até aqui (1 = no previsto). */
   paceRatio: number;
@@ -42,6 +40,11 @@ export interface NavState {
   speedKmh: number | null;
   /** Acima do limite em duas leituras seguidas. */
   overSpeedLimit: boolean;
+}
+
+export interface UpdateOptions {
+  /** O app ainda está falando o anúncio anterior. O aviso de velocidade espera, porque cortaria a fala. */
+  speaking?: boolean;
 }
 
 export interface NavigatorOptions {
@@ -80,7 +83,7 @@ export function createNavigator(route: Route, opts: NavigatorOptions = {}) {
     return suffix[i + 1]! + segDur[i]! * Math.max(0, Math.min(1, frac));
   };
 
-  function update(fix: NavFix): NavState {
+  function update(fix: NavFix, { speaking = false }: UpdateOptions = {}): NavState {
     startedAt ??= fix.t;
     const p: Coord = [fix.lon, fix.lat];
     let proj = projectOnPolyline(coords, cum, p, lastIdx - 3, lastIdx + 80);
@@ -144,19 +147,19 @@ export function createNavigator(route: Route, opts: NavigatorOptions = {}) {
     const speedLimitKmh = speedSpan?.kmh ?? null;
     overFixes = isOverSpeedLimit(fix.speed, speedLimitKmh) ? overFixes + 1 : 0;
     const overSpeedLimit = overFixes >= 2;
-    let announcementQueued = false;
     if (announcement !== null) lastAnnouncedAt = fix.t;
-    // Um aviso por trecho de limite. A pausa evita empilhar falas, e a fila garante que a instrução não seja cortada.
+    // Um aviso por trecho de limite, só com a voz livre: o app interrompe a fala em curso. Sai no fix em que
+    // a voz libera, com o limite do trecho desse fix.
     else if (
       overSpeedLimit &&
       speedSpan &&
       !arrived &&
+      !speaking &&
       fix.t - lastAnnouncedAt >= SPEECH_GAP_MS &&
       !spoken.has(`speed:${speedSpan.beginIdx}`)
     ) {
       spoken.add(`speed:${speedSpan.beginIdx}`);
       announcement = `Atenção: limite de ${speedSpan.kmh} km/h`;
-      announcementQueued = true;
       lastAnnouncedAt = fix.t;
     }
 
@@ -175,7 +178,6 @@ export function createNavigator(route: Route, opts: NavigatorOptions = {}) {
       arrived,
       currentStreet: current?.streetNames[0] ?? null,
       announcement,
-      announcementQueued,
       progress: total > 0 ? along / total : 1,
       paceRatio,
       speedLimitKmh,

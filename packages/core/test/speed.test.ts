@@ -145,7 +145,6 @@ describe('limite de velocidade: navegação', () => {
     const b = nav.update(at(0.6, 60, 9000));
     expect(b.overSpeedLimit).toBe(true);
     expect(b.announcement).toBe('Atenção: limite de 40 km/h');
-    expect(b.announcementQueued).toBe(true);
     const c = nav.update(at(0.8, 60, 10000));
     expect(c.overSpeedLimit).toBe(true);
     expect(c.announcement).toBeNull();
@@ -155,13 +154,31 @@ describe('limite de velocidade: navegação', () => {
 
   it('não corta a fala de um anúncio recente', () => {
     const nav = createNavigator(route([{ beginIdx: 0, endIdx: 10, kmh: 40 }]));
-    expect(nav.update(at(0.2, 30, 1000)).announcementQueued).toBe(false); // anúncio de saída, ainda sendo falado
+    nav.update(at(0.2, 30, 1000)); // anúncio de saída, ainda sendo falado
     nav.update(at(0.4, 60, 2000));
     const b = nav.update(at(0.6, 60, 3000));
     expect(b.overSpeedLimit).toBe(true);
     expect(b.announcement).toBeNull();
     // Passada a pausa, o aviso sai.
     expect(nav.update(at(0.8, 60, 8000)).announcement).toBe('Atenção: limite de 40 km/h');
+  });
+
+  it('espera a voz liberar e avisa o limite do trecho em que o carro está', () => {
+    const nav = createNavigator(
+      route([
+        { beginIdx: 0, endIdx: 1, kmh: 40 },
+        { beginIdx: 1, endIdx: 10, kmh: 30 },
+      ]),
+    );
+    nav.update(at(0.2, 30, 1000)); // anúncio de saída
+    nav.update(at(0.4, 60, 8000), { speaking: true });
+    const b = nav.update(at(0.6, 60, 9000), { speaking: true });
+    expect(b.overSpeedLimit).toBe(true);
+    expect(b.announcement).toBeNull();
+    // A voz liberou já no trecho seguinte: o aviso cita o limite atual.
+    const c = nav.update(at(1.5, 60, 10000), { speaking: false });
+    expect(c.speedLimitKmh).toBe(30);
+    expect(c.announcement).toBe('Atenção: limite de 30 km/h');
   });
 
   it('com o fix longe da rota, não mostra limite', () => {

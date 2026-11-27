@@ -11,7 +11,7 @@ import { useSettings } from '../src/lib/store';
 
 const mocks = vi.hoisted(() => ({
   announcement: null as string | null,
-  announcementQueued: false,
+  updateOpts: [] as unknown[],
   bgSupported: true,
   offRoute: false,
   visit: false,
@@ -53,9 +53,10 @@ vi.mock('@wayboo/core', () => ({
     const nav = { route, updates: 0 };
     mocks.navigators.push(nav);
     return {
-      update: () => {
+      update: (_fix: unknown, opts: unknown) => {
         nav.updates++;
-        return { arrived: false, offRoute: mocks.offRoute, announcement: mocks.announcement, announcementQueued: mocks.announcementQueued };
+        mocks.updateOpts.push(opts);
+        return { arrived: false, offRoute: mocks.offRoute, announcement: mocks.announcement };
       },
     };
   },
@@ -120,7 +121,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   active.clear();
   mocks.announcement = null;
-  mocks.announcementQueued = false;
+  mocks.updateOpts = [];
   mocks.bgSupported = true;
   mocks.offRoute = false;
   mocks.visit = false;
@@ -305,24 +306,21 @@ describe('voz da navegação', () => {
     mocks.announcement = 'Vire à direita';
     await startNavigation(plan, 0, false);
     await settle();
-    expect(Speech.speak).toHaveBeenCalledWith('Vire à direita', { language: 'pt-BR', voice: 'Luciana', rate: 1.02 });
+    expect(Speech.speak).toHaveBeenCalledWith('Vire à direita', expect.objectContaining({ language: 'pt-BR', voice: 'Luciana', rate: 1.02 }));
   });
 
-  it('instrução corta a fala em curso, aviso de velocidade entra na fila', async () => {
+  it('avisa o navegador enquanto a fala não termina', async () => {
     useSettings.setState({ voice: true });
     useLocationStore.setState({ fix });
     mocks.announcement = 'Vire à direita';
     await startNavigation(plan, 0, false);
     await settle();
-    expect(Speech.speak).toHaveBeenLastCalledWith('Vire à direita', expect.anything());
-    const stops = vi.mocked(Speech.stop).mock.calls.length;
-    expect(stops).toBeGreaterThan(0);
-    mocks.announcement = 'Atenção: limite de 40 km/h';
-    mocks.announcementQueued = true;
+    mocks.announcement = null;
     useLocationStore.setState({ fix: { ...fix, t: 2 } });
-    await settle();
-    expect(Speech.speak).toHaveBeenLastCalledWith('Atenção: limite de 40 km/h', expect.anything());
-    expect(Speech.stop).toHaveBeenCalledTimes(stops);
+    expect(mocks.updateOpts.at(-1)).toEqual({ speaking: true });
+    vi.mocked(Speech.speak).mock.calls.at(-1)![1]!.onDone!();
+    useLocationStore.setState({ fix: { ...fix, t: 3 } });
+    expect(mocks.updateOpts.at(-1)).toEqual({ speaking: false });
   });
 
   it('sem voz no idioma, fala só com o idioma', async () => {
@@ -331,7 +329,7 @@ describe('voz da navegação', () => {
     mocks.announcement = 'Vire à direita';
     await startNavigation(plan, 0, false);
     await settle();
-    expect(Speech.speak).toHaveBeenCalledWith('Vire à direita', { language: 'pt-BR', voice: undefined, rate: 1.02 });
+    expect(Speech.speak).toHaveBeenCalledWith('Vire à direita', expect.objectContaining({ language: 'pt-BR', voice: undefined, rate: 1.02 }));
   });
 
   it('descarta a fala que ainda esperava a voz quando a navegação para', async () => {
@@ -375,7 +373,7 @@ describe('voz da navegação', () => {
     mocks.announcement = 'Vire à esquerda';
     useLocationStore.setState({ fix: { ...fix, t: 2 } });
     await settle();
-    expect(Speech.speak).toHaveBeenCalledWith('Vire à esquerda', { language: 'pt-BR', voice: 'Luciana', rate: 1.02 });
+    expect(Speech.speak).toHaveBeenCalledWith('Vire à esquerda', expect.objectContaining({ language: 'pt-BR', voice: 'Luciana', rate: 1.02 }));
   });
 });
 

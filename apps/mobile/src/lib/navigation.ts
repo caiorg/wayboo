@@ -186,14 +186,31 @@ let speechGen = 0;
 
 const canSpeak = () => useSettings.getState().voice && !useNavSession.getState().muted;
 
-/** Com `queued`, a fala espera a anterior terminar (iOS, Android e web enfileiram) em vez de cortá-la. */
-function speak(text: string, queued = false) {
+/** Início da fala em curso. Sem callback de fim (o Chrome às vezes não dispara), vale por até `SPEECH_MAX_MS`. */
+let speakingSince: number | null = null;
+const SPEECH_MAX_MS = 20_000;
+
+const isSpeaking = () => speakingSince !== null && Date.now() - speakingSince < SPEECH_MAX_MS;
+
+function speak(text: string) {
   if (!canSpeak()) return;
   const gen = ++speechGen;
+  speakingSince = Date.now();
+  const done = () => {
+    if (gen === speechGen) speakingSince = null;
+  };
   void voiceFor(INSTRUCTION_LANGUAGE).then((id) => {
-    if (gen !== speechGen || !canSpeak()) return;
-    if (!queued) Speech.stop();
-    Speech.speak(text, { language: INSTRUCTION_LANGUAGE, voice: id ?? undefined, rate: 1.02 });
+    if (gen !== speechGen) return;
+    if (!canSpeak()) return done();
+    Speech.stop();
+    Speech.speak(text, {
+      language: INSTRUCTION_LANGUAGE,
+      voice: id ?? undefined,
+      rate: 1.02,
+      onDone: done,
+      onStopped: done,
+      onError: done,
+    });
   });
 }
 
@@ -260,6 +277,7 @@ function cleanup() {
   flushTimer = null;
   navigator = null;
   speechGen++;
+  speakingSince = null;
   Speech.stop();
   releaseKeepAwake();
 }
@@ -293,11 +311,11 @@ async function reroute(fix: NavFix) {
 
 function onFix(fix: NavFix) {
   if (!navigator || finishing) return;
-  const st = navigator.update(fix);
+  const st = navigator.update(fix, { speaking: isSpeaking() });
   const s = useNavSession.getState();
   const stops = markVisitedStops(s.stops, fix, { alongM: st.alongM, project: navigator.project, lastWithin: navigator.lastWithin });
   useNavSession.setState(stops === s.stops ? { nav: st } : { nav: st, stops });
-  if (st.announcement) speak(st.announcement, st.announcementQueued);
+  if (st.announcement) speak(st.announcement);
   if (!s.simulated) {
     trace.samples.push({ t: fix.t, lat: fix.lat, lon: fix.lon, speed: fix.speed ?? null, heading: fix.heading ?? null, accuracy: fix.accuracy ?? null });
     // O Android pausa os timers do JS com o app em segundo plano; os fixes da task continuam chegando.
