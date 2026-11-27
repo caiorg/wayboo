@@ -1,6 +1,7 @@
 import { formatDistancePtBR, formatDurationPtBR, routeVia, type Brief, type PlanResponse, type StopSuggestion } from '@wayboo/core';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useTheme } from '@/lib/theme';
+import { OfflineRouteButton } from './OfflineRouteButton';
 import { Button, Card, Chip, Icon, T } from './ui';
 
 const clock = (epoch: number) => new Date(epoch).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
@@ -168,6 +169,7 @@ export function RouteSheet({
         <Chip icon="brain" tone={level.tone} label={level.label} />
         {plan.context.weather ? <Chip icon="weather-partly-cloudy" label={plan.context.weather.description} /> : null}
       </View>
+      {plan.routes[selected] ? <OfflineRouteButton route={plan.routes[selected].route} /> : null}
       <View style={styles.actions}>
         <Button label="Simular" kind="secondary" icon="play-speed" onPress={() => onStart(true)} style={{ flex: 1 }} />
         <Button label="Iniciar" icon="navigation-variant" onPress={() => onStart(false)} style={{ flex: 2 }} />
