@@ -2,7 +2,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Camera, GeoJSONSource, Images, Layer, Map, type CameraRef, type ImageEntry, type LayerProps } from '@maplibre/maplibre-react-native';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet } from 'react-native';
-import { buildSources, GLYPH_IMAGE_SIZE, layerSpecs, MAP_GLYPHS, SOURCE, type MapViewProps } from './mapData';
+import { alertIdOf, buildSources, GLYPH_IMAGE_SIZE, layerSpecs, MAP_GLYPHS, SOURCE, type MapViewProps } from './mapData';
 
 type GlyphName = keyof typeof MaterialCommunityIcons.glyphMap;
 
@@ -24,7 +24,7 @@ function loadGlyphImages(): Promise<Record<string, ImageEntry>> {
 }
 
 /** Implementação nativa (iOS/Android). A versão web fica em MapView.web.tsx. */
-export function MapView({ theme, data, camera, initialCenter, onLongPress, onUserPan }: MapViewProps) {
+export function MapView({ theme, data, camera, initialCenter, onLongPress, onUserPan, onAlertPress }: MapViewProps) {
   const cameraRef = useRef<CameraRef>(null);
   const sources = useMemo(() => buildSources(data), [data]);
   const layers = useMemo(() => layerSpecs(theme), [theme]);
@@ -69,7 +69,21 @@ export function MapView({ theme, data, camera, initialCenter, onLongPress, onUse
       <Camera ref={cameraRef} initialViewState={{ center: initialCenter, zoom: 13 }} />
       <Images images={images} />
       {(Object.keys(SOURCE) as (keyof typeof SOURCE)[]).map((key) => (
-        <GeoJSONSource key={key} id={SOURCE[key]} data={sources[key]}>
+        <GeoJSONSource
+          key={key}
+          id={SOURCE[key]}
+          data={sources[key]}
+          onPress={
+            key === 'alerts'
+              ? (e) => {
+                  const id = alertIdOf(e.nativeEvent.features);
+                  if (!id) return;
+                  e.stopPropagation();
+                  onAlertPress?.(id);
+                }
+              : undefined
+          }
+        >
           {layers
             .filter((l) => l.source === SOURCE[key])
             .map(({ source: _source, ...l }) => (

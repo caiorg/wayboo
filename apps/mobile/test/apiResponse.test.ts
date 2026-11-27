@@ -44,6 +44,16 @@ describe('leitura da resposta', () => {
     await expect(p).resolves.toEqual({});
   });
 
+  it('alertas: corpo ilegível numa resposta 200 vira erro, não lista vazia', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ok(async () => ({}))));
+    await expect(api.alerts({ minLat: 0, minLon: 0, maxLat: 1, maxLon: 1 })).rejects.toMatchObject({ status: 0 });
+  });
+
+  it('voto: corpo ilegível numa resposta 200 vira erro, não confirmação', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ok(async () => ({}))));
+    await expect(api.vote('a1', true)).rejects.toMatchObject({ status: 0 });
+  });
+
   it('erro HTTP usa a mensagem do servidor', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 500, json: async () => ({ error: 'Erro interno' }) }) as unknown as Response));
     await expect(api.exportMyData()).rejects.toMatchObject({ status: 500, message: 'Erro interno' });

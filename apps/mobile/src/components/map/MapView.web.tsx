@@ -1,8 +1,8 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Map as MlMap, setWorkerUrl, type GeoJSONSource, type LayerSpecification, type MapMouseEvent } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { useEffect, useRef } from 'react';
-import { buildSources, GLYPH_IMAGE_SIZE, layerSpecs, MAP_GLYPHS, SOURCE, type MapViewProps } from './mapData';
+import { useEffect, useLayoutEffect, useRef } from 'react';
+import { ALERT_LAYERS, alertIdOf, buildSources, GLYPH_IMAGE_SIZE, layerSpecs, MAP_GLYPHS, SOURCE, type MapViewProps } from './mapData';
 
 // O Metro não resolve o worker que o maplibre-gl 6 carrega via import.meta.url.
 // O postinstall copia o arquivo para public/, que o Expo serve na raiz.
@@ -45,11 +45,14 @@ function loadGlyphImages(): Promise<Record<string, GlyphImage>> {
 }
 
 /** Implementação web com maplibre-gl. Mesmas camadas e fontes da versão nativa. */
-export function MapView({ theme, data, camera, initialCenter, onLongPress, onUserPan }: MapViewProps) {
+export function MapView({ theme, data, camera, initialCenter, onLongPress, onUserPan, onAlertPress }: MapViewProps) {
   const el = useRef<HTMLDivElement>(null);
   const map = useRef<MlMap | null>(null);
-  const latest = useRef({ data, theme, onLongPress, onUserPan });
-  latest.current = { data, theme, onLongPress, onUserPan };
+  const latest = useRef({ data, theme, onLongPress, onUserPan, onAlertPress });
+  // Depois de cada commit e antes dos eventos do usuário: uma renderização descartada não vaza para os handlers.
+  useLayoutEffect(() => {
+    latest.current = { data, theme, onLongPress, onUserPan, onAlertPress };
+  });
 
   const install = (m: MlMap) => {
     const sources = buildSources(latest.current.data);
@@ -83,6 +86,17 @@ export function MapView({ theme, data, camera, initialCenter, onLongPress, onUse
     m.on('style.load', () => install(m));
     m.on('contextmenu', (e: MapMouseEvent) => latest.current.onLongPress?.({ lat: e.lngLat.lat, lon: e.lngLat.lng }));
     m.on('dragstart', () => latest.current.onUserPan?.());
+    // Caixa de 24 px em volta do toque: o marcador tem 9 a 14 px de raio, pouco para o dedo.
+    // No nativo, o `GeoJSONSource` já usa 44 px. Filtra as camadas a cada toque porque trocar o estilo as recria.
+    m.on('click', (e: MapMouseEvent) => {
+      const layers = ALERT_LAYERS.filter((id) => m.getLayer(id));
+      if (!layers.length) return;
+      const { x, y } = e.point;
+      const id = alertIdOf(m.queryRenderedFeatures([[x - 12, y - 12], [x + 12, y + 12]], { layers }));
+      if (id) latest.current.onAlertPress?.(id);
+    });
+    m.on('mouseenter', ALERT_LAYERS, () => (m.getCanvas().style.cursor = 'pointer'));
+    m.on('mouseleave', ALERT_LAYERS, () => (m.getCanvas().style.cursor = ''));
     return () => {
       m.remove();
       map.current = null;

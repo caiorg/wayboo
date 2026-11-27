@@ -6,11 +6,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MapView } from '@/components/map/MapView';
 import type { CameraCommand, MapData } from '@/components/map/mapData';
 import { NavBanner, NavBottomBar } from '@/components/NavHud';
-import { ArrivalCard, ReportSheet, SuggestionCard } from '@/components/Panels';
+import { AlertSheet, ArrivalCard, ReportSheet, SuggestionCard } from '@/components/Panels';
 import { RouteSheet } from '@/components/RouteSheet';
 import { SearchPanel } from '@/components/SearchPanel';
 import { Card, IconButton, T } from '@/components/ui';
-import { api, RegistrationLimitError, type GeocodeResult } from '@/lib/api';
+import { alertsBox, alertsByIds, groupIdsOf, mergeAlerts, upsertAlerts } from '@/lib/alertGroups';
+import { api, ApiError, RegistrationLimitError, type GeocodeResult } from '@/lib/api';
 import { checkReportAccuracy } from '@/lib/gpsAccuracy';
 import { startLocation, useLocationStore } from '@/lib/location';
 import { dismissSession, resumeNavigation, startNavigation, stopNavigation, toggleMute, useNavSession } from '@/lib/navigation';
@@ -31,6 +32,7 @@ export default function MapScreen() {
   const session = useNavSession();
   const avoidTolls = useSettings((s) => s.avoidTolls);
   const avoidHighways = useSettings((s) => s.avoidHighways);
+  const userId = useSettings((s) => s.userId);
 
   const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [selected, setSelected] = useState(0);
@@ -43,6 +45,14 @@ export default function MapScreen() {
   const [reporting, setReporting] = useState(false);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [nearbyAlerts, setNearbyAlerts] = useState<RoadAlert[]>([]);
+  /** Ids do grupo do marcador tocado, enquanto a folha de detalhes está aberta. */
+  const [selectedAlerts, setSelectedAlerts] = useState<string[] | null>(null);
+  /** Cópias mais novas que as das fontes: respostas de voto e recargas pontuais. Entram em `mergeAlerts` como correções. */
+  const [freshAlerts, setFreshAlerts] = useState<RoadAlert[]>([]);
+  /** Alertas que o servidor disse não existirem mais: 404 ao votar ou ausentes numa recarga pontual. */
+  const [goneAlerts, setGoneAlerts] = useState<ReadonlySet<string>>(new Set());
+  /** Votos a caminho do servidor, com a direção, para o spinner ir no botão tocado. */
+  const [voting, setVoting] = useState<ReadonlyMap<string, 'up' | 'down'>>(new Map());
   const [camera, setCamera] = useState<(CameraCommand & { nonce: number }) | null>(null);
   const [follow, setFollow] = useState(true);
   const nonce = useRef(0);
@@ -103,6 +113,42 @@ export default function MapScreen() {
       });
   }, [hereKey, plan, session.status, backgroundError]);
 
+  /**
+   * Busca de novo os alertas de `list` numa caixa que cobre todos, sem depender da localização
+   * (planos feitos sem GPS também), e guarda as cópias novas como correções. Alerta da lista que não
+   * volta expirou; com 500 resultados (o limite da API), a ausência não prova nada.
+   */
+  const refreshAlerts = useCallback(
+    async (list: RoadAlert[]) => {
+      const box = alertsBox(list);
+      if (!box) return;
+      const who = useSettings.getState().userId;
+      try {
+        const { alerts } = await api.alerts(box);
+        if (useSettings.getState().userId !== who) return;
+        const fresh = new Map(alerts.map((a) => [a.id, a]));
+        setFreshAlerts((cur) => upsertAlerts(cur, alerts));
+        if (alerts.length < 500) {
+          const gone = list.filter((a) => !fresh.has(a.id)).map((a) => a.id);
+          if (gone.length) setGoneAlerts((cur) => new Set([...cur, ...gone]));
+        }
+      } catch (e) {
+        backgroundError(e);
+      }
+    },
+    [backgroundError],
+  );
+
+  // Correções, alertas sumidos e os campos `mine`/`myVote` são da identidade que votou. Depois de
+  // apagar os dados (`resetIdentity` nos Ajustes), a identidade nova descarta os dois primeiros,
+  // recarrega a lista ao redor (efeito abaixo) e busca de novo os alertas dos planos abertos.
+  useEffect(() => {
+    setFreshAlerts([]);
+    setGoneAlerts(new Set());
+    setSelectedAlerts(null);
+    void refreshAlerts([...(plan?.routes ?? []), ...(session.plan?.routes ?? [])].flatMap((r) => r.alerts));
+  }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Alertas da comunidade ao redor, atualizados a cada minuto.
   useEffect(() => {
     if (!hereKey) return;
@@ -115,7 +161,7 @@ export default function MapScreen() {
     void load();
     const id = setInterval(load, 60_000);
     return () => clearInterval(id);
-  }, [hereKey, backgroundError]);
+  }, [hereKey, backgroundError, userId]);
 
   const fitPlan = useCallback(
     (p: PlanResponse) => {
@@ -136,6 +182,7 @@ export default function MapScreen() {
   const showPlan = useCallback(
     (p: PlanResponse, extra: { stops?: StopSuggestion[]; message?: string | null } = {}) => {
       setPlan(p);
+      setSelectedAlerts(null);
       setSelected(p.recommendedIndex);
       setBrief(null);
       setStops(extra.stops ?? []);
@@ -235,6 +282,35 @@ export default function MapScreen() {
     }
   };
 
+  const openReport = () => {
+    setSelectedAlerts(null);
+    setReporting(true);
+  };
+
+  const vote = async (a: RoadAlert, up: boolean) => {
+    setVoting((cur) => new Map(cur).set(a.id, up ? 'up' : 'down'));
+    const voter = useSettings.getState().userId;
+    try {
+      const updated = await api.vote(a.id, up);
+      // Os dados foram apagados durante a chamada: o voto é da identidade antiga.
+      if (useSettings.getState().userId !== voter) return;
+      setFreshAlerts((cur) => upsertAlerts(cur, [updated]));
+      if (Date.parse(updated.expiresAt) <= Date.now()) notify('Alerta tirado do mapa. Obrigado!');
+      else notify(up ? 'Confirmação registrada. Obrigado!' : 'Negação registrada. Obrigado!');
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) setGoneAlerts((cur) => new Set(cur).add(a.id));
+      // Já votou (em outro aparelho, ou a lista estava velha) ou é o autor: a cópia nova traz o estado certo.
+      if (e instanceof ApiError && (e.status === 409 || e.status === 403)) void refreshAlerts([a]);
+      notify(e instanceof Error ? e.message : 'Falha ao votar');
+    } finally {
+      setVoting((cur) => {
+        const next = new Map(cur);
+        next.delete(a.id);
+        return next;
+      });
+    }
+  };
+
   // Câmera acompanha o carro durante a navegação, até o usuário arrastar o mapa.
   useEffect(() => {
     if (session.status !== 'navigating' || !follow || !session.nav) return;
@@ -245,29 +321,38 @@ export default function MapScreen() {
   const navigating = session.status === 'navigating';
 
   const mapData: MapData = useMemo(() => {
-    const alertMap = new Map<string, RoadAlert>();
-    for (const a of nearbyAlerts) alertMap.set(a.id, a);
+    // O plano é uma foto do momento em que foi pedido; os alertas ao redor são recarregados a cada minuto.
+    const alerts = (p: PlanResponse | null | undefined) =>
+      mergeAlerts([(p?.routes ?? []).flatMap((r) => r.alerts), nearbyAlerts], goneAlerts, Date.now(), freshAlerts);
     if (navigating && session.route) {
-      for (const r of session.plan?.routes ?? []) for (const a of r.alerts) alertMap.set(a.id, a);
       return {
         routes: [{ id: session.route.id, coords: session.route.geometry, selected: true }],
-        alerts: [...alertMap.values()],
+        alerts: alerts(session.plan),
         slowSpots: session.plan?.routes.find((r) => r.route.id === session.route?.id)?.slowSpots ?? [],
         destination: session.plan?.destination ?? null,
         stops: session.stops.filter((x) => !x.visited),
         puck: session.nav ? { lat: session.nav.snapped[1], lon: session.nav.snapped[0], heading: lastHeading.current } : null,
       };
     }
-    if (plan) for (const r of plan.routes) for (const a of r.alerts) alertMap.set(a.id, a);
     return {
       routes: plan ? plan.routes.map((r, i) => ({ id: r.route.id, coords: r.route.geometry, selected: i === selected })) : [],
-      alerts: [...alertMap.values()],
+      alerts: alerts(plan),
       slowSpots: plan?.routes[selected]?.slowSpots ?? [],
       destination: plan?.destination ?? null,
       stops,
       puck: here ? { ...here, heading: fix?.heading ?? null, accuracy: fix?.accuracy ?? null } : null,
     };
-  }, [navigating, session.route, session.plan, session.stops, session.nav, plan, selected, stops, nearbyAlerts, here?.lat, here?.lon, fix?.accuracy]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [navigating, session.route, session.plan, session.stops, session.nav, plan, selected, stops, nearbyAlerts, freshAlerts, goneAlerts, here?.lat, here?.lon, fix?.accuracy]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const sheetAlerts = useMemo(() => (selectedAlerts ? alertsByIds(mapData.alerts, selectedAlerts) : []), [selectedAlerts, mapData.alerts]);
+  // Todos os alertas do ponto saíram do mapa (expiraram ou foram negados): fecha a folha.
+  useEffect(() => {
+    if (selectedAlerts && sheetAlerts.length === 0) setSelectedAlerts(null);
+  }, [selectedAlerts, sheetAlerts.length]);
+  const alertSheet =
+    sheetAlerts.length > 0 ? (
+      <AlertSheet alerts={sheetAlerts} pending={voting} onVote={(a, up) => void vote(a, up)} onClose={() => setSelectedAlerts(null)} />
+    ) : null;
 
   const panelStyle = wide ? [styles.sidePanel, { top: insets.top + 84 }] : [styles.bottomPanel, { paddingBottom: insets.bottom + 10 }];
 
@@ -280,6 +365,12 @@ export default function MapScreen() {
         initialCenter={SAO_PAULO}
         onLongPress={onLongPress}
         onUserPan={() => navigating && setFollow(false)}
+        onAlertPress={(id) => {
+          // Com o cartão de chegada aberto, a folha ficaria escondida e apareceria sozinha depois.
+          if (session.status === 'arrived') return;
+          setReporting(false);
+          setSelectedAlerts(groupIdsOf(mapData.alerts, id));
+        }}
       />
 
       {navigating ? (
@@ -294,11 +385,13 @@ export default function MapScreen() {
             <View style={panelStyle}>
               <ReportSheet accuracy={reportAccuracy} onReport={report} onClose={() => setReporting(false)} />
             </View>
+          ) : alertSheet ? (
+            <View style={panelStyle}>{alertSheet}</View>
           ) : (
             <NavBottomBar
               nav={session.nav}
               muted={session.muted}
-              onReport={() => setReporting(true)}
+              onReport={openReport}
               onMute={toggleMute}
               onStop={() => void stopNavigation()}
             />
@@ -318,7 +411,7 @@ export default function MapScreen() {
               label="Minha localização"
               onPress={() => (here ? command({ type: 'center', center: [here.lon, here.lat], zoom: 15 }) : void startLocation())}
             />
-            <IconButton icon="alert-plus" label="Reportar" onPress={() => setReporting(true)} color={t.warning} />
+            <IconButton icon="alert-plus" label="Reportar" onPress={openReport} color={t.warning} />
           </View>
 
           <View style={panelStyle} pointerEvents="box-none">
@@ -332,6 +425,8 @@ export default function MapScreen() {
               />
             ) : reporting ? (
               <ReportSheet accuracy={reportAccuracy} onReport={report} onClose={() => setReporting(false)} />
+            ) : alertSheet ? (
+              alertSheet
             ) : plan ? (
               <RouteSheet
                 plan={plan}

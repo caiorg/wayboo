@@ -221,7 +221,7 @@ export function evaluatePlan(
 
   const lats = routes.flatMap((r) => r.geometry.map((c) => c[1]));
   const lons = routes.flatMap((r) => r.geometry.map((c) => c[0]));
-  const alerts = alertsInBox(Math.min(...lats), Math.min(...lons), Math.max(...lats), Math.max(...lons));
+  const alerts = alertsInBox(Math.min(...lats), Math.min(...lons), Math.max(...lats), Math.max(...lons), Date.now(), userId);
   const wf = weatherFlags(weather);
   const baseCtx: TripContext = { ...wf, alertsOnRoute: 0 };
 
