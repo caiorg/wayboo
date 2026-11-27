@@ -234,18 +234,21 @@ async function request<T>(method: Method, path: string, body?: unknown, timeoutM
   const extra = ai ? await aiHeaders(baseUrl) : {};
   const token = await deviceToken(baseUrl);
   if (useSettings.getState().userId !== localId) throw identityReset();
+  // O 422 de uma rota de IA é erro da chave, inclusive na repetição depois do 401.
+  const keyError = (e: unknown) => (ai && e instanceof ApiError && e.status === 422 ? new AiKeyError(422, e.message) : e);
   try {
     return await send<T>(baseUrl, method, path, body, timeoutMs, token, extra);
   } catch (e) {
-    if (ai && e instanceof ApiError && e.status === 422) throw new AiKeyError(422, e.message);
     // Token recusado (banco do servidor recriado, por exemplo): registra o mesmo token de novo, uma vez.
-    if (!(e instanceof ApiError) || e.status !== 401) throw e;
+    if (!(e instanceof ApiError) || e.status !== 401) throw keyError(e);
     if (useSettings.getState().credentials[baseUrl]?.token === token) useSettings.getState().setCredential(baseUrl, { token });
     const retryToken = await deviceToken(baseUrl);
     // Depois de apagar os dados, a operação da identidade antiga não vai para a nova. Testa depois
     // de obter o token: o reset pode acontecer enquanto `deviceToken` espera.
     if (useSettings.getState().userId !== localId) throw identityReset();
-    return send<T>(baseUrl, method, path, body, timeoutMs, retryToken, extra);
+    return await send<T>(baseUrl, method, path, body, timeoutMs, retryToken, extra).catch((e2: unknown) => {
+      throw keyError(e2);
+    });
   }
 }
 

@@ -44,8 +44,9 @@ const CHOICE = { provider: 'openai', model: 'gpt-4o-mini' } as const;
 type Sent = { url: string; headers: Record<string, string> };
 
 /** Servidor falso: registra o aparelho e responde às rotas; `status` força a resposta das rotas de IA. */
-function fakeServer(opts: { aiStatus?: number; aiError?: string } = {}) {
+function fakeServer(opts: { aiStatus?: number; aiError?: string; first401?: boolean } = {}) {
   const sent: Sent[] = [];
+  let pending401 = opts.first401 ?? false;
   const fetch = vi.fn(async (url: string, init: RequestInit) => {
     const headers = (init.headers ?? {}) as Record<string, string>;
     sent.push({ url, headers });
@@ -53,6 +54,10 @@ function fakeServer(opts: { aiStatus?: number; aiError?: string } = {}) {
     const body = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status });
     if (path === '/auth/device') return body({ userId: crypto.randomUUID() });
     const ai = path === '/assistant' || path === '/insights/narrative' || path.endsWith('/brief');
+    if (ai && pending401) {
+      pending401 = false;
+      return body({ error: 'token desconhecido' }, 401);
+    }
     if (ai && opts.aiStatus) return body({ error: opts.aiError ?? 'erro' }, opts.aiStatus);
     if (path === '/me/export') return body({ userId: 'u', exportedAt: 'x', tables: { trips: [] } });
     return body({});
@@ -173,6 +178,18 @@ describe('chave de IA do usuário no app', () => {
     const err = await m.api.brief(crypto.randomUUID()).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(m.AiKeyError);
     expect(err).toMatchObject({ status: 422, message });
+  });
+
+  it('chave recusada na repetição depois do 401 também chega como AiKeyError', async () => {
+    const server = fakeServer({ aiStatus: 422, aiError: 'recusada', first401: true });
+    vi.stubGlobal('fetch', server.fetch);
+    const m = await load();
+    await m.saveAi(CHOICE, KEY);
+
+    const err = await m.api.brief(crypto.randomUUID()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(m.AiKeyError);
+    expect(err).toMatchObject({ status: 422 });
+    expect(server.sent.filter((s) => s.url.endsWith('/brief'))).toHaveLength(2);
   });
 
   it('chave escolhida mas ausente do aparelho: erro claro em vez de usar o servidor calado', async () => {

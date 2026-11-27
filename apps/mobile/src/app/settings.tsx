@@ -310,7 +310,7 @@ export default function SettingsScreen() {
           <T variant="caption">O copiloto usa a IA configurada no servidor. Sem IA no servidor, ele segue por regras.</T>
         )}
         <Button label="Salvar IA" kind="secondary" icon="key-variant" loading={aiBusy} onPress={() => void saveAiChoice()} />
-        {aiKeySaved && s.ai ? (
+        {aiKeySaved ? (
           <Button label="Remover chave deste aparelho" kind="danger" icon="key-remove" disabled={aiBusy} onPress={() => void removeAiKey()} />
         ) : null}
         {aiMsg ? <T variant="caption">{aiMsg}</T> : null}
