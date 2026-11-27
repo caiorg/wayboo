@@ -186,13 +186,31 @@ let speechGen = 0;
 
 const canSpeak = () => useSettings.getState().voice && !useNavSession.getState().muted;
 
+/** Início da fala em curso. Sem callback de fim (o Chrome às vezes não dispara), vale por até `SPEECH_MAX_MS`. */
+let speakingSince: number | null = null;
+const SPEECH_MAX_MS = 20_000;
+
+const isSpeaking = () => speakingSince !== null && Date.now() - speakingSince < SPEECH_MAX_MS;
+
 function speak(text: string) {
   if (!canSpeak()) return;
   const gen = ++speechGen;
+  speakingSince = Date.now();
+  const done = () => {
+    if (gen === speechGen) speakingSince = null;
+  };
   void voiceFor(INSTRUCTION_LANGUAGE).then((id) => {
-    if (gen !== speechGen || !canSpeak()) return;
+    if (gen !== speechGen) return;
+    if (!canSpeak()) return done();
     Speech.stop();
-    Speech.speak(text, { language: INSTRUCTION_LANGUAGE, voice: id ?? undefined, rate: 1.02 });
+    Speech.speak(text, {
+      language: INSTRUCTION_LANGUAGE,
+      voice: id ?? undefined,
+      rate: 1.02,
+      onDone: done,
+      onStopped: done,
+      onError: done,
+    });
   });
 }
 
@@ -259,6 +277,7 @@ function cleanup() {
   flushTimer = null;
   navigator = null;
   speechGen++;
+  speakingSince = null;
   Speech.stop();
   releaseKeepAwake();
 }
@@ -292,7 +311,7 @@ async function reroute(fix: NavFix) {
 
 function onFix(fix: NavFix) {
   if (!navigator || finishing) return;
-  const st = navigator.update(fix);
+  const st = navigator.update(fix, { speaking: isSpeaking() });
   const s = useNavSession.getState();
   const stops = markVisitedStops(s.stops, fix, { alongM: st.alongM, project: navigator.project, lastWithin: navigator.lastWithin });
   useNavSession.setState(stops === s.stops ? { nav: st } : { nav: st, stops });
@@ -457,6 +476,7 @@ export function toggleMute() {
   const muted = !useNavSession.getState().muted;
   if (muted) {
     speechGen++;
+    speakingSince = null;
     Speech.stop();
   }
   useNavSession.setState({ muted });
