@@ -5,6 +5,7 @@ import {
   MAX_TILES_PER_DOWNLOAD,
   OFFLINE_MAX_ZOOM,
   OFFLINE_MIN_ZOOM,
+  reusesTilesOf,
   STOP_AT_BYTES,
   tileCount,
   type Bounds,
@@ -102,5 +103,24 @@ describe('judgeProgress', () => {
   it('para antes de 50 MB ou de 3.000 tiles', () => {
     expect(judgeProgress(status({ completedResourceSize: STOP_AT_BYTES }))).toBe('limit');
     expect(judgeProgress(status({ completedTileCount: MAX_TILES_PER_DOWNLOAD }))).toBe('limit');
+  });
+});
+
+describe('reusesTilesOf', () => {
+  const style = (sources: Record<string, { url?: string; tiles?: string[] }>) => ({ version: 8, sources, layers: [] });
+  const light = style({ omt: { url: 'https://t.example/planet' }, shade: { tiles: ['https://t.example/ne/{z}/{x}/{y}.png'] } });
+
+  it('reaproveita quando as fontes do segundo estilo já estão no primeiro', () => {
+    expect(reusesTilesOf(light, style({ base: { url: 'https://t.example/planet' } }))).toBe(true);
+  });
+
+  it('não reaproveita com uma fonte nova', () => {
+    expect(reusesTilesOf(light, style({ omt: { url: 'https://outro.example/planet' } }))).toBe(false);
+  });
+
+  it('não reaproveita sem o style JSON ou sem fontes', () => {
+    expect(reusesTilesOf(light, null)).toBe(false);
+    expect(reusesTilesOf(null, light)).toBe(false);
+    expect(reusesTilesOf(light, style({}))).toBe(false);
   });
 });

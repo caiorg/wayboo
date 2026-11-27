@@ -119,9 +119,32 @@ export interface PackProgress {
   completedTileSize: number;
 }
 
+/** URLs de tiles de um style JSON: `url` do TileJSON ou a lista `tiles` de cada fonte. */
+function tileSources(style: unknown): Set<string> {
+  const urls = new Set<string>();
+  const sources = (style as { sources?: unknown } | null)?.sources;
+  if (!sources || typeof sources !== 'object') return urls;
+  for (const source of Object.values(sources as Record<string, { url?: unknown; tiles?: unknown }>)) {
+    if (typeof source?.url === 'string') urls.add(source.url);
+    if (Array.isArray(source?.tiles)) for (const t of source.tiles) if (typeof t === 'string') urls.add(t);
+  }
+  return urls;
+}
+
+/**
+ * Se o estilo `next` só usa fontes de tiles que `first` já baixou. Sem isso, os tiles do `next` são novos e contam
+ * inteiros para os 50 MB. Um servidor próprio pode anunciar estilos claro e escuro com fontes diferentes.
+ */
+export function reusesTilesOf(first: unknown, next: unknown): boolean {
+  const have = tileSources(first);
+  const need = tileSources(next);
+  return need.size > 0 && [...need].every((u) => have.has(u));
+}
+
 /**
  * Bytes que contam para o limite de 50 MB. O MapLibre soma em `completedResourceSize` também o que já estava no
- * banco. Nos estilos depois do primeiro, os tiles são os mesmos e vêm do banco, então só estilo, sprites e fontes contam.
+ * banco. Num estilo que reaproveita as fontes do primeiro (`reusesTilesOf`), os tiles vêm do banco, então só estilo,
+ * sprites e fontes contam.
  */
 export const countedBytes = (s: PackProgress, reusesTiles: boolean) =>
   reusesTiles ? s.completedResourceSize - s.completedTileSize : s.completedResourceSize;

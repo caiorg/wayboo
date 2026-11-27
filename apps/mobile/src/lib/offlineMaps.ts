@@ -1,5 +1,5 @@
 import { OfflineManager, type OfflinePack, type OfflinePackStatus } from '@maplibre/maplibre-react-native';
-import { countedBytes, judgeProgress, OFFLINE_MAX_ZOOM, OFFLINE_MIN_ZOOM, STOP_AT_BYTES, type Bounds } from './offlineArea';
+import { countedBytes, judgeProgress, OFFLINE_MAX_ZOOM, OFFLINE_MIN_ZOOM, reusesTilesOf, STOP_AT_BYTES, type Bounds } from './offlineArea';
 
 /** Gravado em cada pacote: identifica os do Wayboo e a parte da rota a que pertencem. */
 // `type`, não `interface`: precisa caber no `Record<string, unknown>` do metadata do pacote.
@@ -133,6 +133,16 @@ function follow(pack: OfflinePack, budget: Budget, onProgress: (status: OfflineP
   });
 }
 
+/** Style JSON de uma URL, ou `null` se a consulta falhar. */
+async function fetchStyle(url: string): Promise<unknown> {
+  try {
+    const res = await fetch(url);
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;
+  }
+}
+
 type Opened = { pack: OfflinePack } | { done: Followed };
 
 async function openPack(style: string, bounds: Bounds, meta: OfflineMeta, budget: Budget): Promise<Opened> {
@@ -159,9 +169,9 @@ async function openPack(style: string, bounds: Bounds, meta: OfflineMeta, budget
 }
 
 /**
- * Baixa `bounds` para cada estilo, um depois do outro, como um único download iniciado pelo usuário. Os tiles são os
- * mesmos nos dois estilos e o MapLibre reaproveita o que já está no banco, então o segundo estilo só traz estilo,
- * sprites e fontes. Sem ele, o mapa sumiria ao trocar para o tema escuro sem rede.
+ * Baixa `bounds` para cada estilo, um depois do outro, como um único download iniciado pelo usuário. No OpenFreeMap os
+ * dois estilos usam as mesmas fontes de tiles e o MapLibre reaproveita o que já está no banco, então o segundo estilo
+ * só traz estilo, sprites e fontes. Sem ele, o mapa sumiria ao trocar para o tema escuro sem rede.
  */
 export async function downloadArea(
   { styles, bounds, meta }: { styles: string[]; bounds: Bounds; meta: OfflineMeta },
@@ -178,11 +188,13 @@ export async function downloadArea(
     }
     runaway = null;
   }
+  // Na falha da consulta, conta os tiles inteiros: contar a mais só para o download antes, contar a menos passa dos 50 MB.
+  const styleJsons = styles.length > 1 ? await Promise.all(styles.map(fetchStyle)) : [];
   let bytes = 0;
   for (const [i, style] of styles.entries()) {
     // O estilo anterior já gastou a cota da parte: o próximo não começa.
     if (bytes >= STOP_AT_BYTES) return { status: 'partial', bytes };
-    const budget: Budget = { reusesTiles: i > 0, alreadyBytes: bytes };
+    const budget: Budget = { reusesTiles: i > 0 && reusesTilesOf(styleJsons[0], styleJsons[i]), alreadyBytes: bytes };
     try {
       const opened = await openPack(style, bounds, meta, budget);
       const result =

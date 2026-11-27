@@ -71,8 +71,16 @@ async function emit(patch: Partial<Status>) {
   h.listeners.get(pack.id)?.progress(pack, pack.current);
 }
 
+/** Fontes de tiles de cada style JSON servido pelo `fetch` falso. Os dois estilos usam a mesma, como no OpenFreeMap. */
+const styleSources: Record<string, string> = { 'https://s/light': 'https://s/planet', 'https://s/dark': 'https://s/planet' };
+
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) => ({ ok: true, json: async () => ({ version: 8, sources: { omt: { type: 'vector', url: styleSources[url] } } }) })),
+  );
+  styleSources['https://s/dark'] = 'https://s/planet';
   h.packs = [];
   h.listeners.clear();
   h.nextId = 0;
@@ -151,6 +159,23 @@ describe('downloadArea', () => {
     await emit({ completedResourceSize: STOP_AT_BYTES + 1, completedTileSize: STOP_AT_BYTES - 1_000_000 });
     await emit({ state: 'complete', percentage: 100, completedResourceSize: STOP_AT_BYTES + 2, completedTileSize: STOP_AT_BYTES - 1_000_000 });
     await expect(done).resolves.toMatchObject({ status: 'complete' });
+  });
+
+  it('segundo estilo com outra fonte de tiles conta os tiles inteiros', async () => {
+    styleSources['https://s/dark'] = 'https://outro/planet';
+    const done = downloadArea({ styles: ['https://s/light', 'https://s/dark'], bounds, meta: meta() }, () => {});
+    await emit({ state: 'complete', percentage: 100, completedResourceSize: 5_000_000, completedTileSize: 4_000_000 });
+    await emit({ completedResourceSize: STOP_AT_BYTES - 4_000_000, completedTileSize: STOP_AT_BYTES - 5_000_000 });
+    await expect(done).resolves.toEqual({ status: 'partial', bytes: STOP_AT_BYTES + 1_000_000 });
+    expect(h.packs[1]!.pause).toHaveBeenCalled();
+  });
+
+  it('sem o style JSON, o segundo estilo conta os tiles inteiros', async () => {
+    vi.mocked(fetch).mockRejectedValue(new Error('offline'));
+    const done = downloadArea({ styles: ['https://s/light', 'https://s/dark'], bounds, meta: meta() }, () => {});
+    await emit({ state: 'complete', percentage: 100, completedResourceSize: 5_000_000, completedTileSize: 4_000_000 });
+    await emit({ completedResourceSize: STOP_AT_BYTES - 4_000_000, completedTileSize: STOP_AT_BYTES - 5_000_000 });
+    await expect(done).resolves.toEqual({ status: 'partial', bytes: STOP_AT_BYTES + 1_000_000 });
   });
 
   it('os dois estilos dividem os mesmos 50 MB', async () => {
