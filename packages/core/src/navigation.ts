@@ -31,6 +31,8 @@ export interface NavState {
   currentStreet: string | null;
   /** Texto a falar agora, se houver */
   announcement: string | null;
+  /** O anúncio é o aviso de velocidade: entra na fila da voz em vez de cortar a fala em curso. */
+  announcementQueued: boolean;
   progress: number;
   /** Razão entre ritmo real e previsto até aqui (1 = no previsto). */
   paceRatio: number;
@@ -142,8 +144,9 @@ export function createNavigator(route: Route, opts: NavigatorOptions = {}) {
     const speedLimitKmh = speedSpan?.kmh ?? null;
     overFixes = isOverSpeedLimit(fix.speed, speedLimitKmh) ? overFixes + 1 : 0;
     const overSpeedLimit = overFixes >= 2;
+    let announcementQueued = false;
     if (announcement !== null) lastAnnouncedAt = fix.t;
-    // Um aviso por trecho de limite. Espera a fala anterior terminar: o app interrompe a fala em curso.
+    // Um aviso por trecho de limite. A pausa evita empilhar falas, e a fila garante que a instrução não seja cortada.
     else if (
       overSpeedLimit &&
       speedSpan &&
@@ -153,6 +156,7 @@ export function createNavigator(route: Route, opts: NavigatorOptions = {}) {
     ) {
       spoken.add(`speed:${speedSpan.beginIdx}`);
       announcement = `Atenção: limite de ${speedSpan.kmh} km/h`;
+      announcementQueued = true;
       lastAnnouncedAt = fix.t;
     }
 
@@ -171,6 +175,7 @@ export function createNavigator(route: Route, opts: NavigatorOptions = {}) {
       arrived,
       currentStreet: current?.streetNames[0] ?? null,
       announcement,
+      announcementQueued,
       progress: total > 0 ? along / total : 1,
       paceRatio,
       speedLimitKmh,

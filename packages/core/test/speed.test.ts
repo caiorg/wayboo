@@ -145,6 +145,7 @@ describe('limite de velocidade: navegação', () => {
     const b = nav.update(at(0.6, 60, 9000));
     expect(b.overSpeedLimit).toBe(true);
     expect(b.announcement).toBe('Atenção: limite de 40 km/h');
+    expect(b.announcementQueued).toBe(true);
     const c = nav.update(at(0.8, 60, 10000));
     expect(c.overSpeedLimit).toBe(true);
     expect(c.announcement).toBeNull();
@@ -154,7 +155,7 @@ describe('limite de velocidade: navegação', () => {
 
   it('não corta a fala de um anúncio recente', () => {
     const nav = createNavigator(route([{ beginIdx: 0, endIdx: 10, kmh: 40 }]));
-    nav.update(at(0.2, 30, 1000)); // anúncio de saída, ainda sendo falado
+    expect(nav.update(at(0.2, 30, 1000)).announcementQueued).toBe(false); // anúncio de saída, ainda sendo falado
     nav.update(at(0.4, 60, 2000));
     const b = nav.update(at(0.6, 60, 3000));
     expect(b.overSpeedLimit).toBe(true);

@@ -186,12 +186,13 @@ let speechGen = 0;
 
 const canSpeak = () => useSettings.getState().voice && !useNavSession.getState().muted;
 
-function speak(text: string) {
+/** Com `queued`, a fala espera a anterior terminar (iOS, Android e web enfileiram) em vez de cortá-la. */
+function speak(text: string, queued = false) {
   if (!canSpeak()) return;
   const gen = ++speechGen;
   void voiceFor(INSTRUCTION_LANGUAGE).then((id) => {
     if (gen !== speechGen || !canSpeak()) return;
-    Speech.stop();
+    if (!queued) Speech.stop();
     Speech.speak(text, { language: INSTRUCTION_LANGUAGE, voice: id ?? undefined, rate: 1.02 });
   });
 }
@@ -296,7 +297,7 @@ function onFix(fix: NavFix) {
   const s = useNavSession.getState();
   const stops = markVisitedStops(s.stops, fix, { alongM: st.alongM, project: navigator.project, lastWithin: navigator.lastWithin });
   useNavSession.setState(stops === s.stops ? { nav: st } : { nav: st, stops });
-  if (st.announcement) speak(st.announcement);
+  if (st.announcement) speak(st.announcement, st.announcementQueued);
   if (!s.simulated) {
     trace.samples.push({ t: fix.t, lat: fix.lat, lon: fix.lon, speed: fix.speed ?? null, heading: fix.heading ?? null, accuracy: fix.accuracy ?? null });
     // O Android pausa os timers do JS com o app em segundo plano; os fixes da task continuam chegando.
