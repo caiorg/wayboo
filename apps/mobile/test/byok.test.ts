@@ -5,6 +5,7 @@ const h = vi.hoisted(() => ({
   async: new Map<string, string>(),
   secure: new Map<string, string>(),
   saved: [] as string[],
+  failDelete: false,
 }));
 
 vi.mock('react-native', () => ({
@@ -29,7 +30,10 @@ vi.mock('@react-native-async-storage/async-storage', () => ({
 vi.mock('expo-secure-store', () => ({
   getItemAsync: async (k: string) => h.secure.get(k) ?? null,
   setItemAsync: async (k: string, v: string) => void h.secure.set(k, v),
-  deleteItemAsync: async (k: string) => void h.secure.delete(k),
+  deleteItemAsync: async (k: string) => {
+    if (h.failDelete) throw new Error('keychain indisponível');
+    h.secure.delete(k);
+  },
   WHEN_UNLOCKED_THIS_DEVICE_ONLY: 'whenUnlockedThisDeviceOnly',
 }));
 vi.mock('../src/lib/saveJson', () => ({ saveJson: async (_name: string, text: string) => void h.saved.push(text) }));
@@ -63,6 +67,7 @@ beforeEach(() => {
   h.async.clear();
   h.secure.clear();
   h.saved = [];
+  h.failDelete = false;
   vi.resetModules();
   for (const m of ['log', 'info', 'warn', 'error', 'debug'] as const)
     vi.spyOn(console, m).mockImplementation((...a: unknown[]) => void consoleOut.push(a.map(String).join(' ')));
@@ -197,6 +202,17 @@ describe('chave de IA do usuário no app', () => {
     expect(await m.hasAiKey()).toBe(false);
     await m.api.narrative();
     expect(server.keySent()).toEqual([]);
+  });
+
+  it('se apagar a chave falhar, a escolha fica para tentar remover de novo', async () => {
+    const m = await load();
+    await m.saveAi(CHOICE, KEY);
+    h.failDelete = true;
+
+    await expect(m.clearAi()).rejects.toThrow();
+
+    expect(h.secure.get(m.AI_KEY_STORE)).toBe(KEY);
+    expect(m.useSettings.getState().ai).toEqual(CHOICE);
   });
 
   it('recusa chave em formato inválido sem gravar nada', async () => {

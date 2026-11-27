@@ -41,9 +41,12 @@ export async function saveAi(choice: AiChoice, key: string | null): Promise<void
   useSettings.getState().set({ ai: { provider: choice.provider, model } });
 }
 
-/** Apaga a chave do aparelho e volta para a IA do servidor. */
+/**
+ * Apaga a chave do aparelho e volta para a IA do servidor. A escolha só sai depois da chave: se apagar falhar, Ajustes
+ * continua mostrando a remoção para tentar de novo.
+ */
 export async function clearAi(): Promise<void> {
-  useSettings.getState().set({ ai: null });
   if (aiKeyInBrowser()) await AsyncStorage.removeItem(AI_KEY_STORE);
   else await SecureStore.deleteItemAsync(AI_KEY_STORE);
+  useSettings.getState().set({ ai: null });
 }
